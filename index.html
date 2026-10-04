@@ -3258,19 +3258,40 @@ window.RoomSvc = (function () {
     if (!taskId && !workOrderId) return { ok: false, reason: '缺少关联维修任务' };
     var linkedTask = taskId ? DB.byId('tasks', taskId) : null;
     var roomId = linkedTask ? linkedTask.roomId : '';
-    if (!roomId && workOrderId) { var wo = DB.byId('workOrders', workOrderId); roomId = wo ? wo.roomId : ''; }
-    var cleans = DB.find('roomClean', function (c) { return !c.endedAt && ((taskId && c.followTaskId === taskId) || (roomId && c.roomId === roomId && c.pausedReason === '等待维修')); });
+    if (!roomId && workOrderId) {
+      var wo = DB.byId('workOrders', workOrderId);
+      roomId = wo ? wo.roomId : '';
+    }
+    var cleans = DB.find('roomClean', function (c) {
+      /* 优先精确关联；兼容旧验收数据：同房间仍未结束的清扫也要被维修闭环找回。 */
+      return !c.endedAt && ((taskId && c.followTaskId === taskId) || (roomId && c.roomId === roomId));
+    });
     var now = Date.now();
     cleans.forEach(function (c) {
-      var patch = { repairResolvedAt: now, repairResult: result || '已修复' };
-      if (c.pausedAt) patch.pausedReason = '维修已完成，待继续清扫';
+      var patch = { repairResolvedAt: now, repairResult: result || '已修复', followTaskId: c.followTaskId || taskId || '' };
+      /* 旧数据若报修时没有成功写入暂停状态，在维修闭环时补齐，避免原清扫任务断链。 */
+      if (!c.pausedAt) { patch.pausedAt = now; patch.pausedReason = '维修已完成，待继续清扫'; }
+      else patch.pausedReason = '维修已完成，待继续清扫';
       DB.update('roomClean', c.id, patch);
       tl(c.roomId, 'repair', '工程维修已完成：' + (result || '已修复') + (c.pausedAt ? '；等待客房员工继续清扫' : '；客房清扫可继续'), { refType: 'workorder', refId: workOrderId || '' });
-      if (c.taskId) Engine.Task.addStep(c.taskId, '工程维修已完成：' + (result || '已修复') + (c.pausedAt ? '，待继续清扫' : ''));
-      Engine.notify(c.cleanerId, { type: 'task', title: DB.roomNo(c.roomId) + ' 房维修已完成', content: c.pausedAt ? '工程已处理完成，请继续清扫' : '工程已处理完成，可继续完成本房清扫', refType: 'task', refId: c.taskId || c.followTaskId || '' });
+      if (c.taskId) {
+        var parent = DB.byId('tasks', c.taskId);
+        var alreadyReported = parent && (parent.steps || []).some(function (s) { return /报修|工程问题/.test(s.text || ''); });
+        if (!alreadyReported) Engine.Task.addStep(c.taskId, '清扫中发现工程问题，已发起工程报修');
+        Engine.Task.addStep(c.taskId, '工程维修已完成：' + (result || '已修复') + '，待继续清扫');
+        /* 等待维修不计客房超时：把任务要求完成时间顺延实际暂停时长。 */
+        if (parent && parent.dueAt && c.pausedAt) DB.update('tasks', c.taskId, { dueAt: parent.dueAt + Math.max(0, now - c.pausedAt) });
+      }
+      Engine.notify(c.cleanerId, {
+        type: 'task', title: DB.roomNo(c.roomId) + ' 房维修已完成',
+        content: c.pausedAt ? '工程已处理完成，请继续清扫' : '工程已处理完成，可继续完成本房清扫',
+        refType: 'task', refId: c.taskId || c.followTaskId || ''
+      });
     });
     if (roomId) {
-      var otherRepair = DB.find('tasks', function (t) { return t.roomId === roomId && t.type === 'repair' && t.id !== taskId && t.status !== 'done' && t.status !== 'closed'; });
+      var otherRepair = DB.find('tasks', function (t) {
+        return t.roomId === roomId && t.type === 'repair' && t.id !== taskId && t.status !== 'done' && t.status !== 'closed';
+      });
       if (!otherRepair.length) DB.update('rooms', roomId, { blockStatus: '' });
     }
     return { ok: true, count: cleans.length };
@@ -3835,7 +3856,7 @@ window.RoomSvc = (function () {
     hkName: hkName, inspName: inspName, prioName: prioName,
     byToken: byToken, byNumber: byNumber, state: state, timeline: timeline, tl: tl,
     scanActions: scanActions,
-    cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanFinish: cleanFinish, cleanWaitRepair: cleanWaitRepair, transferClean: transferClean,
+    cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanWaitRepair: cleanWaitRepair, repairResolved: repairResolved, cleanFinish: cleanFinish, transferClean: transferClean,
     openClean: openClean, cleanToday: cleanToday, lastClean: lastClean,
     inspStart: inspStart, inspFinish: inspFinish, transferInspection: transferInspection, recheckStart: recheckStart, rectifyDone: rectifyDone,
     setPriority: setPriority, releasePriority: releasePriority,
@@ -6483,8 +6504,12 @@ window.Engine = (function () {
           }
         }
       }
+      /* 维修真正闭环后回写关联客房清扫。
+       * 无需验收：维修完成即回写；需要验收：验收通过后才回写。 */
       if ((act === 'finish' && !wo.needsAcceptance) || act === 'verify') {
-        if (typeof RoomSvc !== 'undefined' && RoomSvc.repairResolved) RoomSvc.repairResolved(wo.taskId || '', wo.id, extra.result || wo.result || '已修复');
+        if (typeof RoomSvc !== 'undefined' && RoomSvc.repairResolved) {
+          RoomSvc.repairResolved(wo.taskId || '', wo.id, extra.result || wo.result || '已修复');
+        }
       }
       return DB.byId('workOrders', id);
     },
@@ -12189,12 +12214,27 @@ App.page('task', {
       }
     }
 
+    /* 客房清扫任务与实际 roomClean 状态联动。员工从首页点任务时也能直接看到报修闭环并继续清扫。 */
+    var linkedClean = (t.type === 'housekeeping' && t.roomId)
+      ? DB.findOne('roomClean', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
+    if (linkedClean && linkedClean.followTaskId) {
+      var repairTask = DB.byId('tasks', linkedClean.followTaskId);
+      var repairWo = repairTask && repairTask.woId ? DB.byId('workOrders', repairTask.woId) : null;
+      html += '<div class="card"><div class="card-title">关联工程报修</div>'
+        + '<div class="t-sm mt8">' + U.esc(repairTask ? repairTask.title : '房间工程报修') + '</div>'
+        + '<div class="t-xs c3 mt8">' + (repairWo && repairWo.status === 'done' ? '工程已完成' : '工程处理中')
+        + (repairWo && repairWo.result ? ' · ' + U.esc(repairWo.result) : '') + '</div></div>';
+    }
+
     /* 操作区 */
     var isAssignee = t.assigneeId === me.id;
     var canClaimPool = !t.assigneeId && t.poolDeptId === me.deptId && (!t.poolCap || Policy.can(me, t.poolCap));
     var isCreator = t.creatorId === me.id;
     var canManage = S.isManager() || S.isGM() || t.deptId === me.deptId && S.isManager();
     var acts = [];
+    if (linkedClean && linkedClean.cleanerId === me.id && linkedClean.pausedAt) {
+      acts.push('<button class="btn btn-primary grow" data-act="task-clean-resume" data-id="' + linkedClean.id + '">继续清扫</button>');
+    }
     if (t.status !== 'done' && t.status !== 'closed') {
       if (t.status === 'pending' && (isAssignee || canClaimPool || canManage)) acts.push('<button class="btn btn-primary grow" data-act="task-accept" data-id="' + t.id + '">接单</button>');
       if ((t.status === 'doing' || t.status === 'pending') && isAssignee) acts.push('<button class="btn btn-green grow" data-act="task-finish" data-id="' + t.id + '">完成</button>');
@@ -12233,6 +12273,10 @@ App.page('task', {
 });
 
 App.act('open-task', function (el, ds) { App.go('task/' + el.getAttribute('data-id')); });
+App.act('task-clean-resume', function (el) {
+  var res = RoomSvc.cleanResume(el.getAttribute('data-id'));
+  DB.flush(); U.toast(res && res.ok ? '已继续清扫' : ((res && res.reason) || '暂时无法继续')); App.refresh();
+});
 App.act('task-accept', function (el) {
   Engine.Task.accept(el.getAttribute('data-id')); DB.flush(); U.toast('已接单'); App.refresh();
 });
@@ -18989,10 +19033,26 @@ window.AcceptanceTest = {
 };
 
 document.addEventListener('DOMContentLoaded', function () {
-  DB.find('tasks', function (t) { return /^t_his_/.test(t.id || '') && t.status !== 'done' && t.status !== 'closed'; }).forEach(function (t) {
+  /* 验收版迁移：历史演示数据不得混入“今天我要做什么”。
+   * 只清理 seed 生成的 t_his_* 历史未完成项，不碰人工验收产生的真实测试链路。 */
+  DB.find('tasks', function (t) {
+    return /^t_his_/.test(t.id || '') && t.status !== 'done' && t.status !== 'closed';
+  }).forEach(function (t) {
     DB.update('tasks', t.id, { status: 'done', completedAt: t.completedAt || t.createdAt || Date.now(), result: t.result || '历史演示数据已归档' });
   });
+  /* 兼容本轮验收已经产生的旧数据：报修发生在修复代码部署前时，自动把同房间已完成工程单找回到未结束清扫。
+   * 只在验收版执行，避免要求测试人员重做 803 整条链路。 */
+  DB.find('roomClean', function (x) { return !x.endedAt && !x.repairResolvedAt; }).forEach(function (cl) {
+    var doneRepairs = DB.find('tasks', function (t) {
+      return t.type === 'repair' && t.roomId === cl.roomId && t.status === 'done' && t.createdAt >= cl.startedAt;
+    }).sort(function (a, b) { return b.createdAt - a.createdAt; });
+    if (doneRepairs.length) {
+      var rt = doneRepairs[0], wo = rt.woId ? DB.byId('workOrders', rt.woId) : null;
+      if (wo && wo.status === 'done') RoomSvc.repairResolved(rt.id, wo.id, wo.result || rt.result || '已修复');
+    }
+  });
   DB.flush();
+
   var bar = document.createElement('div');
   bar.className = 'acceptance-bar';
   bar.innerHTML = '<div><b>人工验收测试版</b><span>共享正式业务 localStorage；切换身份不会清空数据</span></div>'
