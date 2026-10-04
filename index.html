@@ -3247,9 +3247,33 @@ window.RoomSvc = (function () {
       followTaskId: taskId
     });
     DB.update('rooms', c.roomId, { hkStatus: 'paused', blockStatus: 'maintenance' });
-    tl(c.roomId, 'clean', c.cleaner + ' 清扫中发现工程问题，已发起报修并暂停清扫', { refType: 'task', refId: taskId });
+    tl(c.roomId, 'clean', c.cleaner + ' 清扫中发现工程问题，已发起报修；当前清扫进入等待维修状态', { refType: 'task', refId: taskId });
+    if (c.taskId) Engine.Task.addStep(c.taskId, '清扫中发现工程问题，已报修；等待维修期间不计入清扫用时');
     Engine.log && Engine.log('清扫中发起工程报修', DB.roomNo(c.roomId));
     return { ok: true, clean: DB.byId('roomClean', cleanId), task: t };
+  }
+
+  /** 工程维修闭环回写客房清扫：不自动替员工“继续”，只解除工程阻断并提醒本人。 */
+  function repairResolved(taskId, workOrderId, result) {
+    if (!taskId && !workOrderId) return { ok: false, reason: '缺少关联维修任务' };
+    var linkedTask = taskId ? DB.byId('tasks', taskId) : null;
+    var roomId = linkedTask ? linkedTask.roomId : '';
+    if (!roomId && workOrderId) { var wo = DB.byId('workOrders', workOrderId); roomId = wo ? wo.roomId : ''; }
+    var cleans = DB.find('roomClean', function (c) { return !c.endedAt && ((taskId && c.followTaskId === taskId) || (roomId && c.roomId === roomId && c.pausedReason === '等待维修')); });
+    var now = Date.now();
+    cleans.forEach(function (c) {
+      var patch = { repairResolvedAt: now, repairResult: result || '已修复' };
+      if (c.pausedAt) patch.pausedReason = '维修已完成，待继续清扫';
+      DB.update('roomClean', c.id, patch);
+      tl(c.roomId, 'repair', '工程维修已完成：' + (result || '已修复') + (c.pausedAt ? '；等待客房员工继续清扫' : '；客房清扫可继续'), { refType: 'workorder', refId: workOrderId || '' });
+      if (c.taskId) Engine.Task.addStep(c.taskId, '工程维修已完成：' + (result || '已修复') + (c.pausedAt ? '，待继续清扫' : ''));
+      Engine.notify(c.cleanerId, { type: 'task', title: DB.roomNo(c.roomId) + ' 房维修已完成', content: c.pausedAt ? '工程已处理完成，请继续清扫' : '工程已处理完成，可继续完成本房清扫', refType: 'task', refId: c.taskId || c.followTaskId || '' });
+    });
+    if (roomId) {
+      var otherRepair = DB.find('tasks', function (t) { return t.roomId === roomId && t.type === 'repair' && t.id !== taskId && t.status !== 'done' && t.status !== 'closed'; });
+      if (!otherRepair.length) DB.update('rooms', roomId, { blockStatus: '' });
+    }
+    return { ok: true, count: cleans.length };
   }
 
   /**
@@ -6458,6 +6482,9 @@ window.Engine = (function () {
             DB.update('tasks', wo.taskId, { status: 'done', completedAt: now, acceptorId: Session.me ? Session.me.id : '', acceptResult: 'pass' });
           }
         }
+      }
+      if ((act === 'finish' && !wo.needsAcceptance) || act === 'verify') {
+        if (typeof RoomSvc !== 'undefined' && RoomSvc.repairResolved) RoomSvc.repairResolved(wo.taskId || '', wo.id, extra.result || wo.result || '已修复');
       }
       return DB.byId('workOrders', id);
     },
@@ -16099,14 +16126,20 @@ App.page('hk', {
       html += '<div class="list">' + running.map(function (c) {
         var r = DB.byId('rooms', c.roomId);
         var paused = !!c.pausedAt;
+        var now = Date.now();
+        var currentPause = c.pausedAt ? Math.max(0, now - c.pausedAt) : 0;
+        var activeMin = Math.max(0, Math.round((now - c.startedAt - (c.pausedMs || 0) - currentPause) / 60000));
+        var waitMin = Math.max(0, Math.round(((c.pausedMs || 0) + currentPause) / 60000));
+        var repairDone = paused && c.pausedReason === '维修已完成，待继续清扫';
         return '<div class="li" style="align-items:flex-start">'
-          + '<div class="li-icon" style="background:' + (paused ? '#fdf1e5' : '#eaf1fd') + '">' + (paused ? '⏸' : '🧹') + '</div>'
+          + '<div class="li-icon" style="background:' + (paused ? '#fdf1e5' : '#eaf1fd') + '">' + (repairDone ? '✅' : (paused ? '⏸' : '🧹')) + '</div>'
           + '<div class="grow"><div class="t-md t-w6">' + U.esc(r ? r.number : '') + ' 房 · ' + U.esc(c.typeName) + '</div>'
-          + '<div class="t-xs c3 mt8">开始于 ' + U.hm(c.startedAt) + ' · 已用 ' + U.diffMin(c.startedAt, Date.now()) + ' 分钟'
-          + (paused ? ' · <span class="c-orange">暂停：' + U.esc(c.pausedReason || '') + '</span>' : '') + '</div>'
+          + '<div class="t-xs c3 mt8">开始于 ' + U.hm(c.startedAt) + ' · 清扫用时 ' + activeMin + ' 分钟'
+          + (waitMin ? ' · 等待/暂停 ' + waitMin + ' 分钟' : '')
+          + (paused ? ' · <span class="' + (repairDone ? 'c-green' : 'c-orange') + '">' + U.esc(c.pausedReason || '暂停') + '</span>' : '') + '</div>'
           + '<div class="row mt12" style="gap:8px;flex-wrap:wrap">'
           + (paused
-            ? '<div class="btn btn-primary btn-sm" data-act="hk-resume" data-id="' + c.id + '">继续</div>'
+            ? '<div class="btn btn-primary btn-sm" data-act="hk-resume" data-id="' + c.id + '">' + (repairDone ? '继续清扫' : '继续') + '</div>'
             : '<div class="btn btn-ghost btn-sm" data-act="hk-pause" data-id="' + c.id + '">暂停</div>')
           + '<div class="btn btn-ghost btn-sm" data-act="hk-report-repair" data-id="' + c.id + '" data-room="' + c.roomId + '">🛠 工程报修</div>'
           + '<div class="btn btn-green btn-sm" data-act="hk-finish" data-id="' + c.id + '">完成清扫</div>'
@@ -18956,6 +18989,10 @@ window.AcceptanceTest = {
 };
 
 document.addEventListener('DOMContentLoaded', function () {
+  DB.find('tasks', function (t) { return /^t_his_/.test(t.id || '') && t.status !== 'done' && t.status !== 'closed'; }).forEach(function (t) {
+    DB.update('tasks', t.id, { status: 'done', completedAt: t.completedAt || t.createdAt || Date.now(), result: t.result || '历史演示数据已归档' });
+  });
+  DB.flush();
   var bar = document.createElement('div');
   bar.className = 'acceptance-bar';
   bar.innerHTML = '<div><b>人工验收测试版</b><span>共享正式业务 localStorage；切换身份不会清空数据</span></div>'
