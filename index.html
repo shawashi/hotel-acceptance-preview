@@ -6093,7 +6093,7 @@ window.Engine = (function () {
         creatorId: o.creatorId || (Session.me ? Session.me.id : 'sys'),
         assigneeId: o.assigneeId || '', createdAt: now, dueAt: now + dueMin * 60000,
         /* 历史责任快照：记录责任人与创建人「当时」的部门/岗位/班次/角色 */
-        snapAssignee: Snapshot.of(o.assigneeId || ''),
+        snapAssignee: o.assigneeId ? Snapshot.of(o.assigneeId) : null,
         snapCreator: Snapshot.of(o.creatorId || (Session.me ? Session.me.id : '')),
         hotelId: scope.hotelId, tenantId: scope.tenantId,
         status: o.assigneeId ? 'pending' : 'pending',
@@ -12098,7 +12098,9 @@ App.page('task', {
       + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
-      + Comp.field('责任人', U.esc(DB.userName(t.assigneeId)))
+      + Comp.field('责任人', t.assigneeId
+        ? U.esc(DB.userName(t.assigneeId))
+        : (t.poolDeptId ? '<span class="c-orange">待接单 · ' + U.esc(DB.deptName(t.poolDeptId)) + '共享</span>' : '未指定'))
       + Comp.field('创建人', U.esc(DB.userName(t.creatorId)))
       + Comp.field('创建时间', U.mdhm(t.createdAt))
       + Comp.field('要求完成', U.mdhm(t.dueAt))
@@ -12111,7 +12113,7 @@ App.page('task', {
     /* 历史责任快照：人员调岗/离职后，历史仍按当时身份展示 */
     var snaps = [];
     if (t.snapCreator) snaps.push(['创建时 · 创建人', t.snapCreator]);
-    if (t.snapAssignee) snaps.push(['派单时 · 责任人', t.snapAssignee]);
+    if (t.snapAssignee && (t.assigneeId || !t.poolDeptId)) snaps.push(['派单时 · 责任人', t.snapAssignee]);
     if (t.snapDoer) snaps.push(['处理时 · 处理人', t.snapDoer]);
     if (t.snapDone) snaps.push(['完成时 · 完成人', t.snapDone]);
     if (t.snapAcceptor) snaps.push(['验收时 · 验收人', t.snapAcceptor]);
@@ -12390,11 +12392,11 @@ function locSummary() {
 }
 
 function assignTip(type) {
-  if (!type) return '选择问题类型后，系统会<b>自动判断责任部门</b>并派单给在岗同事';
+  if (!type) return '选择问题类型后，系统会<b>自动判断责任部门</b>并生成对应任务';
   var deptId = type.dept || (Engine.Session.deptId());
-  var who = Engine.Report.pickAssignee(deptId);
+  var who = type.repair ? '' : Engine.Report.pickAssignee(deptId);
   var desc = type.repair
-    ? '将自动生成<b>工程工单</b>并派给 ' + U.esc(DB.userName(who)) + '，要求 <b>' + type.dueMin + ' 分钟</b>内响应处理'
+    ? '将自动生成<b>工程工单</b>，进入 <b>工程部共享待接单</b>；有维修权限的工程人员均可接单，要求 <b>' + type.dueMin + ' 分钟</b>内响应处理'
     : '将自动派给 <b>' + U.esc(DB.deptName(deptId)) + '</b>' + (who ? ' · ' + U.esc(DB.userName(who)) : '') + '，要求 <b>' + type.dueMin + ' 分钟</b>内完成';
   return '预计流向：' + desc;
 }
@@ -12563,12 +12565,11 @@ App.page('wo', {
     var isFixer = w.assigneeId === me.id, canClaim = !w.assigneeId && me.deptId === 'd_eng' && Policy.can(me, 'maintain'), isHead = me.deptId === 'd_eng' && Engine.Session.isManager() || Engine.Session.isGM();
     var acts = [];
     if (w.status === 'wait' && (isFixer || canClaim || isHead)) {
-      if (w.roomId && window.AcceptanceTest) {
-        acts.push('<button class="btn btn-ghost grow" data-act="accept-scan-room" data-id="' + w.id + '" data-room="r_803">模拟扫描 803 房二维码</button>');
-        acts.push('<button class="btn btn-ghost grow" data-act="accept-scan-room" data-id="' + w.id + '" data-room="r_805">模拟扫描错误房间二维码</button>');
+      if (w.roomId) {
+        acts.push('<button class="btn btn-primary btn-block" data-act="wo-scan-claim" data-id="' + w.id + '">📷 扫描房间二维码并接单</button>');
+      } else {
+        acts.push('<button class="btn btn-primary btn-block" data-act="wo-act" data-id="' + w.id + '" data-a="accept">接单</button>');
       }
-      acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="accept">'
-        + (w.roomId ? '扫码后接单' : '接单') + '</button>');
     }
     if ((w.status === 'accepted') && isFixer) acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="arrive">已到场</button>');
     if (w.status === 'doing' && isFixer) {
@@ -12614,12 +12615,43 @@ App.act('wo-act', function (el) {
   App.refresh();
 });
 
-/* 仅验收构建会渲染按钮；模拟入口仍调用与真实扫码完全相同的服务层校验。 */
-App.act('accept-scan-room', function (el) {
-  if (!window.AcceptanceTest) return;
-  var res = Engine.WorkOrder.scanRoom(el.getAttribute('data-id'), el.getAttribute('data-room'));
-  if (!res.ok) { U.toast(res.reason); return; }
-  DB.flush(); U.toast('房间二维码校验通过'); App.refresh();
+/* 客房维修扫码接单：主界面只保留一个动作。
+ * 验收版在弹层里提供“正确二维码/错误二维码”两个测试入口；
+ * 真实小程序接摄像头扫码后同样调用 wo-scan-claim-submit。
+ * 正确扫码后直接接单进入处理中，不再要求第二次点击。 */
+App.act('wo-scan-claim', function (el) {
+  var id = el.getAttribute('data-id');
+  var w = DB.byId('workOrders', id);
+  if (!w || !w.roomId) return;
+  var roomNo = DB.roomNo(w.roomId);
+  if (window.AcceptanceTest) {
+    var badRoom = DB.findOne('rooms', function (r) { return r.id !== w.roomId; });
+    App.sheet({
+      title: '扫描房间二维码',
+      body: '<div class="pad" style="padding:8px 18px 4px">'
+        + '<div class="center" style="padding:18px 0 10px"><div style="font-size:46px">📷</div>'
+        + '<div class="t-lg t-w6 mt8">请扫描 ' + U.esc(roomNo) + ' 房二维码</div>'
+        + '<div class="t-sm c3 mt8">二维码匹配后将自动接单并进入处理中</div></div>'
+        + '<button class="btn btn-primary btn-block btn-lg mt16" data-act="wo-scan-claim-submit" data-id="' + id + '" data-room="' + w.roomId + '">模拟扫描 ' + U.esc(roomNo) + ' 房二维码</button>'
+        + (badRoom ? '<button class="btn btn-ghost btn-block mt12" data-act="wo-scan-claim-submit" data-id="' + id + '" data-room="' + badRoom.id + '">测试错误房间二维码（' + U.esc(badRoom.number) + ' 房）</button>' : '')
+        + '</div>',
+      foot: '<button class="btn btn-ghost btn-block" data-act="close-sheet">取消</button>'
+    });
+    return;
+  }
+  U.toast('请使用小程序扫码功能扫描房间二维码');
+});
+
+App.act('wo-scan-claim-submit', function (el) {
+  var id = el.getAttribute('data-id');
+  var res = Engine.WorkOrder.scanRoom(id, el.getAttribute('data-room'));
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '二维码校验失败'); return; }
+  var claim = Engine.WorkOrder.action(id, 'accept');
+  if (!claim || claim.ok === false) { U.toast((claim && claim.reason) || '接单失败'); return; }
+  DB.flush();
+  App.closeSheet();
+  U.toast(DB.roomNo(claim.roomId) + ' 房核验通过，已接单');
+  App.refresh();
 });
 
 /* 维修完成：填写耗材与结果 */
