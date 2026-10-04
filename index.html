@@ -12098,9 +12098,11 @@ App.page('task', {
       + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
-      + Comp.field('责任人', t.assigneeId
-        ? U.esc(DB.userName(t.assigneeId))
-        : (t.poolDeptId ? '<span class="c-orange">待接单 · ' + U.esc(DB.deptName(t.poolDeptId)) + '共享</span>' : '未指定'))
+      + Comp.field('责任人', (wo && wo.assigneeId)
+        ? U.esc(DB.userName(wo.assigneeId))
+        : (t.assigneeId
+          ? U.esc(DB.userName(t.assigneeId))
+          : (t.poolDeptId ? '<span class="c-orange">待接单 · ' + U.esc(DB.deptName(t.poolDeptId)) + '共享</span>' : '未指定')))
       + Comp.field('创建人', U.esc(DB.userName(t.creatorId)))
       + Comp.field('创建时间', U.mdhm(t.createdAt))
       + Comp.field('要求完成', U.mdhm(t.dueAt))
