@@ -6070,9 +6070,9 @@ window.Engine = (function () {
       var scope = Guard.scopeOf(u);
       if (scope === 'all' || scope === 'wide') return true;
       if (scope === 'dept') return t.deptId === u.deptId || t.creatorId === u.id || t.assigneeId === u.id;
-      /* 部门共享池任务：未接单前对本部门具备对应能力的一线员工可见；
-       * 一旦有人接单（assigneeId 写入），其他员工立即失去该共享可见性。 */
-      if (!t.assigneeId && t.poolDeptId && t.poolDeptId === u.deptId &&
+      /* 部门共享池任务在整个处理周期内都对本部门具备对应能力的员工可见。
+       * 未接单时可认领；有人接单后其他员工仍可查看“谁在处理中”，但不能重复操作。 */
+      if (t.poolDeptId && t.poolDeptId === u.deptId &&
           (!t.poolCap || Policy.can(u, t.poolCap))) return true;
       return t.creatorId === u.id || t.assigneeId === u.id || t.claimBy === u.id;
     },
@@ -6281,9 +6281,9 @@ window.Engine = (function () {
         if (opt.mineOrPool) {
           var me = Session.me || {};
           var mine = t.assigneeId === me.id || t.claimBy === me.id;
-          var poolAvailable = !t.assigneeId && t.poolDeptId && t.poolDeptId === me.deptId &&
+          var poolVisible = t.poolDeptId && t.poolDeptId === me.deptId &&
             (!t.poolCap || Policy.can(me, t.poolCap));
-          if (!mine && !poolAvailable) return false;
+          if (!mine && !poolVisible) return false;
         }
         if (opt.from && t.createdAt < opt.from) return false;
         if (opt.to && t.createdAt > opt.to) return false;
@@ -11615,7 +11615,7 @@ function staffEntries(u) {
   if (Policy.can(u, 'inspect')) add('go-hk-inspect', '查房', '🔍', '#eaf1fd');
   /* 工程：工单、会议设备、工程采购、待验收、扫码 */
   if (Policy.can(u, 'maintain')) {
-    add('go-mywo', '我的工单', '🛠️', '#fdf1e5');
+    add('go-mywo', '工程工单', '🛠️', '#fdf1e5');
     add('go-meeting', '会议设备', '🏛', '#eaf1fd');
   }
   /* 前厅：客房作业发起、销售预订待确认、住客早餐、今日会议、客诉 */
@@ -12028,7 +12028,7 @@ App.page('tasks', {
     if (statusFilter === 'overdue') list = list.filter(Engine.Task.isOverdue);
     if (r.params.type) list = list.filter(function (t) { return t.type === r.params.type; });
 
-    var tabs = [{ k: 'mine', n: '我的任务' }];
+    var tabs = [{ k: 'mine', n: Policy.can(me, 'maintain') ? '工程任务' : '我的任务' }];
     if (S.isManager() || S.canSeeAll()) tabs.push({ k: 'dept', n: '本部门' });
     if (S.canSeeAll() || S.isManager()) tabs.push({ k: 'all', n: '全部' });
 
@@ -12284,12 +12284,12 @@ App.act('insp-submit', function (el) {
 
 /* ---------------- 我的工单（工程/相关岗位） ---------------- */
 App.page('mywo', {
-  title: '我的工单',
+  title: '工程工单',
   render: function () {
     var me = Engine.Session.user();
     var list = DB.find('workOrders', function (w) {
+      if (w.deptId === me.deptId && Policy.can(me, 'maintain')) return true;
       if (w.assigneeId === me.id) return true;
-      if (!w.assigneeId && w.deptId === me.deptId && Policy.can(me, 'maintain')) return true;
       return me.roles.indexOf('manager') >= 0 && w.deptId === me.deptId;
     }).sort(function (a, b) { return b.createdAt - a.createdAt; });
     var html = '<div class="card" style="margin-top:12px"><div class="kpi-grid c3">'
@@ -12306,7 +12306,8 @@ function woRow(w) {
     + '<div class="li-icon" style="background:#fdf1e5">🛠️</div>'
     + '<div class="grow"><div class="row-b"><div class="t-md t-w6 ell">' + U.esc(w.title) + '</div>'
     + '<div class="t-xs c3">' + U.relTime(w.createdAt) + '</div></div>'
-    + '<div class="t-xs c3 mt8">' + U.esc(w.location || '—') + ' · ' + U.esc(w.category) + ' · ' + U.esc(DB.userName(w.assigneeId || '')) + '</div>'
+    + '<div class="t-xs c3 mt8">' + U.esc(w.location || '—') + ' · ' + U.esc(w.issueTypeName || w.category) + ' · '
+    + (w.assigneeId ? U.esc(DB.userName(w.assigneeId)) + (w.status !== 'done' ? '处理中' : '已完成') : '待接单') + '</div>'
     + '<div class="mt8">' + (Engine.WorkOrder.isOverdue(w) ? '<span class="chip chip-red">已超时</span>' : U.chip('wo', w.status))
     + (w.cost ? '<span class="chip chip-line" style="margin-left:6px">' + U.money0(w.cost) + '</span>' : '') + '</div></div>'
     + '<div class="li-arrow">›</div></div>';
@@ -12529,7 +12530,7 @@ App.page('wo', {
       + Comp.field('问题分类', U.esc(w.issueTypeName || w.category || '—'))
       + (w.roomId ? Comp.field('关联房间', '<span data-act="open-room" data-id="' + w.roomId + '" class="c-blue">' + U.esc(DB.roomNo(w.roomId)) + ' 房 ›</span>') : '')
       + Comp.field('报修人', U.esc(DB.userName(w.creatorId)))
-      + Comp.field('责任人', U.esc(DB.userName(w.assigneeId || '')))
+      + Comp.field('责任人', w.assigneeId ? U.esc(DB.userName(w.assigneeId)) : '<span class="c-orange">待接单 · 工程部共享</span>')
       + Comp.field('创建时间', U.mdhm(w.createdAt))
       + Comp.field('要求完成', U.mdhm(w.dueAt))
       + (w.cost ? Comp.field('成本', U.money(w.cost)) : '')
