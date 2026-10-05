@@ -6078,7 +6078,10 @@ window.Sales = (function () {
   function stName(k) { return (ST[k] || ST.pending).name; }
   function stCls(k) { return (ST[k] || ST.pending).cls; }
 
-  function hotel() { return DB.all('hotels')[0] || { id: 'h_1', tenantId: 't_1' }; }
+  function hotel() {
+    var s = (typeof AuthContext !== 'undefined' && AuthContext.scope) ? AuthContext.scope() : {};
+    return { id: s.hotelId || 'h_1', tenantId: s.tenantId || 't_1' };
+  }
   function code() { return 'SR' + U.ymd().replace(/-/g, '') + '-' + U.pad2(DB.nextSeq('SR')); }
 
   /* ==========================================================================
@@ -6092,7 +6095,10 @@ window.Sales = (function () {
       return Policy.fail('你没有提交客房预订报备的权限（需要销售权限）');
     });
     if (d) return d;
+    if (!o.customer && !o.team) return Policy.fail('请填写客户或团队名称');
     if (!o.checkIn || !o.checkOut) return Policy.fail('请填写入住与离店日期');
+    var inAt = new Date(o.checkIn).getTime(), outAt = new Date(o.checkOut).getTime();
+    if (!isFinite(inAt) || !isFinite(outAt) || outAt <= inAt) return Policy.fail('离店日期必须晚于入住日期');
     var types = (o.roomTypes || []).filter(function (x) { return x && x.qty > 0; });
     if (!types.length) return Policy.fail('请至少选择一个房型及数量');
 
@@ -6106,7 +6112,8 @@ window.Sales = (function () {
       roomCount: types.reduce(function (s, x) { return s + Number(x.qty); }, 0),
       nights: Math.max(1, Math.round((new Date(o.checkOut) - new Date(o.checkIn)) / 86400000)),
       price: o.price == null ? '' : o.price,
-      breakfast: o.breakfast ? 1 : 0, breakfastCount: Number(o.breakfastCount) || 0,
+      breakfast: o.breakfast ? 1 : 0,
+      breakfastCount: o.breakfast ? (Number(o.breakfastCount) || types.reduce(function (s, x) { return s + Number(x.qty); }, 0)) : 0,
       channel: o.channel || '协议客户',
       requirement: o.requirement || '', remark: o.remark || '',
       status: 'pending',
@@ -6148,12 +6155,17 @@ window.Sales = (function () {
     });
     if (d) return d;
     if (['received', 'needinfo', 'booked'].indexOf(result) < 0) return Policy.fail('未知的确认结果');
-    /* §19 状态不能跳跃：只能从 pending / needinfo 推进；booked 必须先经过 received */
-    if (['pending', 'needinfo'].indexOf(r.status) < 0) {
+    /* §19 状态机：pending/needinfo → received；received → booked。
+     * needinfo 也允许前厅再次确认收到；booked 不能从 pending 直接跳过 received。 */
+    if (result === 'booked') {
+      if (r.status !== 'received' && Policy.rule('salesNeedReceived') !== false) {
+        return Policy.fail('请先确认收到（前厅已收到），再标记已完成预订');
+      }
+      if (['received', 'pending', 'needinfo'].indexOf(r.status) < 0) {
+        return Policy.fail('当前状态不可完成预订：' + stName(r.status));
+      }
+    } else if (['pending', 'needinfo'].indexOf(r.status) < 0) {
       return Policy.fail('当前状态不可确认：' + stName(r.status));
-    }
-    if (result === 'booked' && r.status === 'pending' && Policy.rule('salesNeedReceived') !== false) {
-      return Policy.fail('请先确认收到（前厅已收到），再标记已完成预订，不能跳过中间状态');
     }
     DB.update('salesReservations', id, {
       status: result,
@@ -6227,7 +6239,7 @@ window.Sales = (function () {
    * ======================================================================= */
   function list(filter) {
     filter = filter || {};
-    var l = DB.all('salesReservations').slice();
+    var l = DB.find('salesReservations', function (r) { return AuthContext.inScope(r); }).slice();
     if (filter.salesId) l = l.filter(function (r) { return r.salesId === filter.salesId; });
     if (filter.status) {
       var st = [].concat(filter.status);
@@ -7886,6 +7898,7 @@ window.Engine = (function () {
       var sc = Purchase._supplierCheck(pr, me);
       if (!sc.ok) return sc;
       if (pr.status !== 'quoting') return Purchase._err('当前状态不可报价：' + Purchase.stName(pr.status));
+      if (pr.supplierStatus !== 'accepted') return Purchase._err('请先确认接单，再填写报价');
       (quotes || []).forEach(function (q) {
         var it = pr.items.filter(function (x) { return x.name === q.name; })[0];
         if (!it) return;
@@ -8160,8 +8173,18 @@ window.Engine = (function () {
       var d = Policy.deny('purchase_order', null, '你没有采购下单权限');
       if (d) return { ok: false, reason: d.reason, error: d.reason };
       if (pr.status !== 'buying') return Purchase._err('当前状态不可下单：' + Purchase.stName(pr.status));
-      pr.flow.push({ step: '采购下单', userId: Session.me.id, action: '已下单', at: Date.now(), comment: supplierId ? '供应商：' + (DB.byId('suppliers', supplierId) || {}).name : '' });
-      DB.update('purchases', id, { status: 'receiving', supplierId: supplierId || pr.supplierId, flow: pr.flow, updatedAt: Date.now() });
+      var finalSupplierId = supplierId || pr.supplierId;
+      var finalSupplier = DB.byId('suppliers', finalSupplierId);
+      if (!finalSupplierId || !finalSupplier || finalSupplier.active === 0) return Purchase._err('请选择有效的合作供应商后再下单');
+      var portalSupplier = DB.findOne('users', function (u) {
+        return u.supplierId === finalSupplierId && (u.roles || []).indexOf('supplier') >= 0 && (u.status || 'active') !== 'leave';
+      });
+      pr.flow.push({ step: '采购下单', userId: Session.me.id, action: '已下单', at: Date.now(), comment: '供应商：' + finalSupplier.name });
+      DB.update('purchases', id, {
+        status: 'receiving', supplierId: finalSupplierId,
+        deliveryRequired: portalSupplier ? 1 : 0,
+        deliveryStatus: '', deliveredAt: 0, flow: pr.flow, updatedAt: Date.now()
+      });
       /* 通知供应商账号（动态查找绑定账号），以及验收人 */
       var su = DB.findOne('users', function (u) { return u.supplierId === (supplierId || pr.supplierId); });
       if (su) notify(su.id, { type: 'task', title: '收到采购订单，请安排配送', content: pr.code + ' · ' + U.money0(pr.amount), refType: 'purchase', refId: id });
@@ -8236,8 +8259,8 @@ window.Engine = (function () {
       /* §9.3 配送三校验：供应商身份 + 单据归属 + 状态允许 */
       var sc = Purchase._supplierCheck(pr, Session.me);
       if (!sc.ok) return sc;
-      if (['buying', 'receiving'].indexOf(pr.status) < 0) {
-        return Policy.fail('当前状态不允许标记配送：' + Purchase.stName(pr.status));
+      if (pr.status !== 'receiving') {
+        return Policy.fail('酒店尚未完成审批和下单，当前不能标记配送：' + Purchase.stName(pr.status));
       }
       if (pr.deliveryStatus === 'delivered') return Policy.fail('已标记过配送，不要重复提交');
       pr.flow.push({
@@ -8272,6 +8295,9 @@ window.Engine = (function () {
       /* §19 状态不能跳跃：只有 receiving（待验收/再次待验收）才能验收 */
       if (pr0.status !== 'receiving') {
         return Purchase._err('当前状态不可验收：' + Purchase.stName(pr0.status));
+      }
+      if (pr0.deliveryRequired === 1 && pr0.deliveryStatus !== 'delivered') {
+        return Purchase._err('供应商尚未确认配送，当前无需验收');
       }
       if (!Purchase.canAccept(pr0, me.id)) {
         return Purchase._err('你没有该品类（' + Purchase.kindInfo(pr0.kind).name + '）的验收权限');
@@ -8394,22 +8420,16 @@ window.Engine = (function () {
       });
       Purchase._save(id, {
         flow: pr.flow,
+        /* 异常处理完成后必须重新进入配送环节；上一次“已配送”不能沿用。 */
+        deliveryStatus: '', deliveredAt: 0,
         acceptInfo: Object.assign({}, pr.acceptInfo || {}, {
           handled: 1, handleAction: action, handleNote: note || '',
           handleAt: Date.now(), handleBy: Session.me ? Session.me.id : '',
           handleByName: Session.me ? Session.me.name : ''
         })
       }, 'receiving');
-      /* 通知该品类的验收人再次验收（动态查找，不写死人） */
-      var acc2 = Purchase.acceptorsOf(pr.kind);
-      if (!acc2.length) acc2 = [DB.byId('users', pr.applicantId)].filter(Boolean);
-      acc2.forEach(function (u) {
-        notify(u.id, {
-          type: 'approve', title: '供应商已处理异常，请再次验收',
-          content: pr.code + ' · ' + Purchase.excName(action) + (note ? ' · ' + note : ''),
-          refType: 'purchase', refId: id
-        });
-      });
+      /* 处理完成不等于货已重新送达：这里只留流转记录。
+       * 等供应商真正点击“已配送”后，再由 deliver() 通知验收人，避免一线人员收到过早待办。 */
       Audit.write({
         targetType: 'purchase', targetId: id, targetName: pr.code, action: '处理验收异常',
         field: 'status', from: 'exception', to: 'receiving',
@@ -8498,7 +8518,9 @@ window.Engine = (function () {
             || me.roles.indexOf('investor') >= 0;
         }
         if (p.status === 'receiving') {
-          // 再次验收：申请人 / 部门负责人 / 店长
+          /* 有供应商端协同时，只有实际配送后才进入酒店验收人的待办；
+           * 线下供应商无门户账号时仍允许酒店按实际到货直接验收。 */
+          if (p.deliveryRequired === 1 && p.deliveryStatus !== 'delivered') return false;
           return p.applicantId === userId || deptHead(p.deptId) === userId || me.roles.indexOf('gm') >= 0;
         }
         /* V4：验收异常必须有人跟到底 */
@@ -8595,7 +8617,20 @@ window.Engine = (function () {
     active: function (cat) {
       return Supplier.list().filter(function (s) {
         if (s.active === 0) return false;
-        return !cat || (s.categories || []).indexOf(cat) >= 0;
+        if (!cat) return true;
+        /* 历史数据的 categories 可能被迁移成 ['食材'] / ['工程耗材']，
+         * 新数据则使用 ['food'] / ['eng']。查询时统一归一化，不要求人工改旧档案。 */
+        var rawCats = (s.categories && s.categories.length ? s.categories : [s.category || '']).map(String);
+        var cats = [];
+        rawCats.forEach(function (raw) {
+          if (raw === 'food' || /食材|餐饮|冻品|农产品/.test(raw)) {
+            if (cats.indexOf('food') < 0) cats.push('food');
+          }
+          if (raw === 'eng' || /工程|五金|机电|照明|电气|设备|维保/.test(raw)) {
+            if (cats.indexOf('eng') < 0) cats.push('eng');
+          }
+        });
+        return cats.indexOf(cat) >= 0;
       });
     },
     /** 店长创建供应商（可同时绑定登录账号） */
@@ -8646,7 +8681,12 @@ window.Engine = (function () {
     bindUser: function (id, userId) {
       var me = Session.me;
       if (!Supplier.canManage(me) && !Guard.isInvestor(me)) return { ok: false, reason: '供应商由店长维护' };
-      // 一个账号只能绑定一家供应商
+      // 一个账号只能绑定一家供应商；改绑时同步清理旧账号归属，避免旧账号继续看到采购单。
+      var target = DB.byId('suppliers', id);
+      if (target && target.boundUserId && target.boundUserId !== userId) {
+        var oldUser = DB.byId('users', target.boundUserId);
+        if (oldUser && oldUser.supplierId === id) DB.update('users', oldUser.id, { supplierId: '' });
+      }
       DB.find('suppliers', function (s) { return s.boundUserId === userId && s.id !== id; })
         .forEach(function (s) { DB.update('suppliers', s.id, { boundUserId: '' }); });
       DB.update('suppliers', id, { boundUserId: userId || '' });
@@ -10123,13 +10163,14 @@ window.Engine = (function () {
       /* 已存在的食材采购即使门店后来关闭餐厅，也必须保留处理出口。 */
       if (Policy.can(me, 'accept_food')) {
         DB.find('purchases', function (p) {
-          return AuthContext.inScope(p) && p.kind === 'food' && (p.status === 'receiving' || p.status === 'exception')
+          return AuthContext.inScope(p) && p.kind === 'food' && p.status === 'receiving'
+            && !(p.deliveryRequired === 1 && p.deliveryStatus !== 'delivered')
             && Purchase.canAccept(p, me.id);
         }).forEach(function (p) {
           out.push({
             id: 'purchase:' + p.id, refType: 'purchase', refId: p.id, kind: 'food_accept',
-            statusGroup: p.status === 'exception' ? 'alert' : 'confirm', priority: p.status === 'exception' ? 'high' : 'normal',
-            title: '食材到货验收 · ' + p.code, subtitle: p.status === 'exception' ? '验收异常待处理/再次验收' : '待验收',
+            statusGroup: 'confirm', priority: 'normal',
+            title: '食材到货验收 · ' + p.code, subtitle: '已到货，待验收',
             route: 'purchase/' + p.id, dueAt: 0, createdAt: p.createdAt || 0
           });
         });
@@ -12540,7 +12581,7 @@ function homeSupplier(me) {
   var waiting = mine.filter(function (p) { return p.status === 'quoting' && p.supplierStatus !== 'declined'; });
   var declined = mine.filter(function (p) { return p.supplierStatus === 'declined'; });
   var quoted = mine.filter(function (p) { return p.status === 'quoted'; });
-  var delivering = mine.filter(function (p) { return p.status === 'buying' || (p.status === 'receiving' && p.deliveryStatus !== 'delivered'); });
+  var delivering = mine.filter(function (p) { return p.status === 'receiving' && p.deliveryStatus !== 'delivered'; });
   var exception = mine.filter(function (p) { return p.status === 'exception'; });
   var doneAmt = U.sum(mine.filter(function (p) { return p.status === 'done'; }).map(function (p) { return p.amount; }), '');
 
@@ -12584,7 +12625,7 @@ function homeSupplier(me) {
       return '<div class="li" data-act="open-purchase" data-id="' + p.id + '">'
         + '<div class="li-icon" style="background:#faf4e9">🚚</div>'
         + '<div class="grow"><div class="t-md t-w6">' + U.esc(p.code) + ' · ' + U.money0(p.amount) + '</div>'
-        + '<div class="t-xs c3 mt8">酒店已下单/待到货，配送后请标记</div></div>'
+        + '<div class="t-xs c3 mt8">酒店已正式下单，送达后请标记配送</div></div>'
         + '<div class="btn btn-primary btn-sm" data-act="pr-sup-deliver" data-id="' + p.id + '">标记配送</div></div>';
     }).join('') + '</div>';
   }
@@ -14667,24 +14708,31 @@ function supplierPurchaseList(r) {
   var all = DB.find('purchases', function (p) { return p.supplierId === me.supplierId; })
     .sort(function (a, b) { return b.createdAt - a.createdAt; });
   var list = all;
-  if (tab === 'quote') list = all.filter(function (p) { return p.status === 'quoting'; });
-  if (tab === 'quoted') list = all.filter(function (p) { return p.status === 'quoted'; });
-  if (tab === 'done') list = all.filter(function (p) { return p.status !== 'quoting' && p.status !== 'quoted'; });
+  if (tab === 'quote') list = all.filter(function (p) {
+    return p.status === 'quoting' || p.status === 'exception' || (p.status === 'receiving' && p.deliveryStatus !== 'delivered');
+  });
+  if (tab === 'waiting') list = all.filter(function (p) {
+    return p.status === 'quoted' || p.status === 'dept' || p.status === 'boss' || p.status === 'buying'
+      || (p.status === 'receiving' && p.deliveryStatus === 'delivered');
+  });
+  if (tab === 'done') list = all.filter(function (p) {
+    return p.status === 'done' || p.status === 'canceled' || p.status === 'rejected';
+  });
 
   var sup = DB.byId('suppliers', me.supplierId);
   var html = '<div class="card mt12" style="background:linear-gradient(135deg,#16304f,#0d1e33);color:#fff">'
     + '<div class="t-md t-w6">' + U.esc(sup ? sup.name : '供应商') + '</div>'
     + '<div class="t-xs mt8" style="color:rgba(255,255,255,.66)">' + U.esc(me.name) + ' · ' + U.esc(me.post) + '</div>'
     + '<div class="hero-kpis" style="margin-top:14px">'
-    + '<div class="hero-kpi"><div class="v">' + all.filter(function (p) { return p.status === 'quoting'; }).length + '</div><div class="k">待报价</div></div>'
-    + '<div class="hero-kpi"><div class="v">' + all.filter(function (p) { return p.status === 'quoted'; }).length + '</div><div class="k">待对方确认</div></div>'
+    + '<div class="hero-kpi"><div class="v">' + all.filter(function (p) { return p.status === 'quoting' || p.status === 'exception' || (p.status === 'receiving' && p.deliveryStatus !== 'delivered'); }).length + '</div><div class="k">待我处理</div></div>'
+    + '<div class="hero-kpi"><div class="v">' + all.filter(function (p) { return p.status === 'quoted' || p.status === 'dept' || p.status === 'boss' || p.status === 'buying' || (p.status === 'receiving' && p.deliveryStatus === 'delivered'); }).length + '</div><div class="k">等待酒店</div></div>'
     + '<div class="hero-kpi"><div class="v">' + all.length + '</div><div class="k">累计清单</div></div>'
     + '</div><div class="t-xs mt12" style="color:rgba(255,255,255,.55)">酒店只填名称与数量，请补上今日价格后提交</div>'
     + '</div>';
 
-  html += Comp.seg([{ k: 'quote', n: '待报价' }, { k: 'quoted', n: '已报价' }, { k: 'done', n: '历史' }], tab, 'purchase-tab');
+  html += Comp.seg([{ k: 'quote', n: '待我处理' }, { k: 'waiting', n: '等待酒店' }, { k: 'done', n: '已结束' }], tab, 'purchase-tab');
   html += list.length ? '<div class="list">' + list.slice(0, 40).map(purchaseRowEx).join('') + '</div>'
-    : Comp.empty(tab === 'quote' ? '当前没有待报价清单' : '暂无记录', '🧾');
+    : Comp.empty(tab === 'quote' ? '当前没有需要你处理的采购单' : '暂无记录', '🧾');
   return html;
 }
 
@@ -14789,7 +14837,7 @@ function purchaseDetail(id) {
   /* 供应商：接单 / 拒单 / 报价 / 配送 —— 四段式，不能验收、不能完成 */
   if (mySup && p.status === 'quoting') {
     if (p.supplierStatus !== 'accepted') {
-      acts.push('<button class="btn btn-primary grow" data-act="pr-sup-accept" data-id="' + p.id + '">确认接单</button>');
+      acts.push('<button class="btn btn-primary grow" data-act="pr-sup-accept" data-id="' + p.id + '">接单并报价</button>');
       acts.push('<button class="btn btn-ghost grow" data-act="pr-sup-decline" data-id="' + p.id + '">无法接单</button>');
     } else {
       acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="go-quote" data-id="' + p.id + '">💰 填写今日价格</button>');
@@ -14797,7 +14845,7 @@ function purchaseDetail(id) {
   } else if (p.status === 'quoting' && mySup) {
     acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="go-quote" data-id="' + p.id + '">💰 填写今日价格</button>');
   }
-  if (mySup && (p.status === 'buying' || (p.status === 'receiving' && p.deliveryStatus !== 'delivered'))) {
+  if (mySup && p.status === 'receiving' && p.deliveryStatus !== 'delivered') {
     acts.push('<button class="btn btn-primary btn-block" data-act="pr-sup-deliver" data-id="' + p.id + '">标记已配送</button>');
   }
   if (p.status === 'quoting' && !mySup && (S.isPurchase() || S.isGM() || S.isInvestor())) acts.push('<button class="btn btn-ghost btn-block" data-act="pr-urge" data-id="' + p.id + '">催供应商报价</button>');
@@ -14805,11 +14853,12 @@ function purchaseDetail(id) {
     acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="pr-confirm" data-id="' + p.id + '">确认价格，送审批</button>');
   }
   var canDept = Engine.deptHead(p.deptId) === me.id && p.status === 'dept';
-  var canBoss = (S.isGM() || S.isFinance() || S.isInvestor()) && p.status === 'boss';
+  var canBoss = S.isGM() && p.status === 'boss';
   /* V4.2.1 §9：下单是明确能力 purchase_order，不再按角色猜 */
   var canBuy = Policy.can(me, 'purchase_order') && p.status === 'buying';
   /* V4.2 §6.3：验收按品类权限 —— 餐厅采购默认餐厅负责人验收，工程由工程验收人员 */
-  var canReceive = Engine.Purchase.canAccept(p, me.id) && (p.status === 'receiving' || p.status === 'exception');
+  var canReceive = Engine.Purchase.canAccept(p, me.id) && p.status === 'receiving'
+    && !(p.deliveryRequired === 1 && p.deliveryStatus !== 'delivered');
   if (canDept || canBoss) {
     acts.push('<button class="btn btn-ghost grow" data-act="pr-reject" data-id="' + p.id + '">驳回</button>');
     acts.push('<button class="btn btn-primary grow" data-act="pr-approve" data-id="' + p.id + '">批准</button>');
@@ -14825,7 +14874,7 @@ function purchaseDetail(id) {
     html += '<div class="card" style="border-left:3px solid var(--red)"><div class="card-title">验收不合格</div>'
       + '<div class="t-xs c2 mt8">处理方式：' + U.esc(Engine.Purchase.excName(ai.result)) + '　第 ' + (ai.round || 1) + ' 次验收</div>'
       + (ai.reason ? '<div class="t-xs c2 mt8">原因：' + U.esc(ai.reason) + '</div>' : '')
-      + '<div class="t-xs c3 mt8">不合格绝不直接完成：需供应商处理（退换/补货/部分收货/协商）后重新配送，再次验收合格才关闭。</div>'
+      + '<div class="t-xs c3 mt8">不合格绝不直接完成：供应商处理后必须重新配送，酒店再次验收合格才关闭。</div>'
       + (mySup || S.isPurchase() || S.isGM()
         ? '<div class="btn btn-primary btn-block mt12" data-act="pr-exc-handle" data-id="' + p.id + '">供应商处理完成，重新配送</div>' : '')
       + '</div>';
@@ -14905,7 +14954,7 @@ App.act('pr-order', function (el) {
 });
 App.act('pr-order-ok', function (el) {
   Engine.Purchase.order(el.getAttribute('data-id'), el.getAttribute('data-sup'));
-  DB.flush(); App.closeSheet(); U.toast('已下单，到货后由申请人验收'); App.refresh();
+  DB.flush(); App.closeSheet(); U.toast('已下单，供应商配送后由授权验收人验收'); App.refresh();
 });
 App.act('pr-receive', function (el) {
   var id = el.getAttribute('data-id'), pass = el.getAttribute('data-pass') === '1';
@@ -14917,9 +14966,12 @@ App.act('pr-receive', function (el) {
 
 /* ---------- V4.2 §6.3 供应商接单 / 拒单 / 配送 ---------- */
 App.act('pr-sup-accept', function (el) {
-  var res = Engine.Purchase.accept(el.getAttribute('data-id'));
+  var id = el.getAttribute('data-id');
+  var res = Engine.Purchase.accept(id);
   DB.flush();
-  U.toast(res && res.repeat ? '你已接过单' : '已接单，请尽快报价'); App.refresh();
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '接单失败'); return; }
+  U.toast(res.repeat ? '已接单，继续报价' : '已接单');
+  App.go('quote/' + id);
 });
 App.act('pr-sup-decline', function (el) {
   var id = el.getAttribute('data-id');
@@ -15056,9 +15108,15 @@ App.page('approvals', {
 var _fa = null;
 function faInit() {
   var me = Engine.Session.user();
+  var activeFood = Engine.Supplier.active('food');
+  var recent = DB.find('purchases', function (p) {
+    return p.kind === 'food' && p.applicantId === me.id && !!p.supplierId
+      && activeFood.some(function (s) { return s.id === p.supplierId; });
+  }).sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); })[0];
   return {
     deptId: me.deptId === 'd_sup' ? 'd_fb' : me.deptId,
-    supplierId: '', cat: '', items: [], reason: '', expectAt: U.ymd(Date.now() + 86400000), saveLib: true
+    supplierId: recent ? recent.supplierId : (activeFood[0] ? activeFood[0].id : ''),
+    cat: '', items: [], reason: '', expectAt: U.ymd(Date.now() + 86400000), saveLib: true
   };
 }
 
@@ -15072,7 +15130,7 @@ App.page('food-apply', {
     var cats = Engine.Ingredient.cats();
     var cat = _fa.cat || cats[0] || '';
     var libs = Engine.Ingredient.byCat(cat);
-    var sups = DB.all('suppliers');
+    var sups = Engine.Supplier.active('food');
     var sup = DB.byId('suppliers', _fa.supplierId);
 
     var html = '';
@@ -15137,7 +15195,7 @@ App.act('fa-cat', function (el) { _fa.cat = el.getAttribute('data-c'); App.go('f
 App.act('fa-sup', function () {
   App.sheet({
     title: '选择供应商',
-    body: '<div class="list">' + DB.all('suppliers').map(function (s) {
+    body: '<div class="list">' + Engine.Supplier.active('food').map(function (s) {
       return '<div class="li" data-act="fa-sup-pick" data-id="' + s.id + '">'
         + '<div class="li-icon" style="background:#e7f6ef">🏷️</div>'
         + '<div class="grow"><div class="t-md t-w6">' + U.esc(s.name) + '</div>'
@@ -19215,6 +19273,8 @@ App.page('sales', {
     var board = Sales.board(me.id);
     var mBoard = Sales.meetingBoard(me.id);
     var isFO = Policy.can(u, 'frontdesk');
+    var isSales = Policy.can(u, 'sales');
+    if (!isFO && !isSales) return Comp.empty('当前岗位无需使用销售工作台', '🛏');
     var html = '';
 
     /* 前厅视角：待确认 */
@@ -19247,8 +19307,8 @@ App.page('sales', {
       html += '</div>';
     }
 
-    /* 销售视角 */
-    if (Policy.can(u, 'sales') || isFO) {
+    /* 销售视角：前厅只处理确认，不展示销售人员的新增入口与“我的预订”统计。 */
+    if (isSales) {
       html += '<div class="card"><div class="kpi-grid c3">'
         + '<div class="kpi"><div class="v c-orange">' + board.waiting.length + '</div><div class="k">待前厅确认</div></div>'
         + '<div class="kpi"><div class="v c-green">' + board.confirmed.length + '</div><div class="k">已确认</div></div>'
@@ -19262,9 +19322,10 @@ App.page('sales', {
     }
 
     /* 我的客房预订 */
-    html += Comp.sectionTitle('我的客房预订');
-    if (!board.mine.length) html += Comp.empty('还没有提交预订报备', '🛏');
-    else html += '<div class="list">' + board.mine.map(function (r) {
+    if (isSales) {
+      html += Comp.sectionTitle('我的客房预订');
+      if (!board.mine.length) html += Comp.empty('还没有提交预订报备', '🛏');
+      else html += '<div class="list">' + board.mine.map(function (r) {
       return '<div class="li" style="align-items:flex-start">'
         + '<div class="li-icon" style="background:#f0ecfd">🛏</div>'
         + '<div class="grow"><div class="row-b"><div class="t-md t-w6 ell">' + U.esc(r.customer || r.team || '未命名') + '</div>'
@@ -19280,18 +19341,19 @@ App.page('sales', {
         + '</div></div></div>';
     }).join('') + '</div>';
 
-    /* 我的会议室预订 */
-    if (mBoard.mine.length) {
-      html += Comp.sectionTitle('我的会议室预订');
-      html += '<div class="list">' + mBoard.mine.map(function (r) {
-        return '<div class="li" data-act="mt-res-open" data-id="' + r.id + '">'
-          + '<div class="li-icon" style="background:#eaf1fd">🏛</div>'
-          + '<div class="grow"><div class="row-b"><div class="t-md t-w6 ell">' + U.esc(r.meetingRoomName) + '</div>'
-          + '<span class="chip chip-' + Meeting.rsCls(r.status) + '">' + Meeting.rsName(r.status) + '</span></div>'
-          + '<div class="t-xs c3 mt8">' + U.esc(r.date) + ' ' + U.esc(r.startTime) + '-' + U.esc(r.endTime) + ' · ' + U.esc(r.customer || '') + '</div>'
-          + (r.foConfirmedAt ? '<div class="t-xs c3 mt8">前厅确认：' + U.esc(DB.userName(r.foConfirmedBy)) + ' · ' + U.mdhm(r.foConfirmedAt) + '</div>' : '')
-          + '</div><div class="li-arrow">›</div></div>';
-      }).join('') + '</div>';
+      /* 我的会议室预订 */
+      if (mBoard.mine.length) {
+        html += Comp.sectionTitle('我的会议室预订');
+        html += '<div class="list">' + mBoard.mine.map(function (r) {
+          return '<div class="li" data-act="mt-res-open" data-id="' + r.id + '">'
+            + '<div class="li-icon" style="background:#eaf1fd">🏛</div>'
+            + '<div class="grow"><div class="row-b"><div class="t-md t-w6 ell">' + U.esc(r.meetingRoomName) + '</div>'
+            + '<span class="chip chip-' + Meeting.rsCls(r.status) + '">' + Meeting.rsName(r.status) + '</span></div>'
+            + '<div class="t-xs c3 mt8">' + U.esc(r.date) + ' ' + U.esc(r.startTime) + '-' + U.esc(r.endTime) + ' · ' + U.esc(r.customer || '') + '</div>'
+            + (r.foConfirmedAt ? '<div class="t-xs c3 mt8">前厅确认：' + U.esc(DB.userName(r.foConfirmedBy)) + ' · ' + U.mdhm(r.foConfirmedAt) + '</div>' : '')
+            + '</div><div class="li-arrow">›</div></div>';
+        }).join('') + '</div>';
+      }
     }
     return html;
   }
@@ -19308,37 +19370,34 @@ App.page('sl-new', {
   render: function () {
     var f = _slForm;
     var types = Space.roomTypes().filter(function (t) { return t.active !== 0; });
-    var html = '<div class="card mt12"><div class="card-title">1. 客户 / 团队</div>'
-      + '<div class="field mt12"><div class="field-label">客户或团队名称</div><input class="inp" id="sl-cust" placeholder="如：XX 旅行社" style="text-align:left"></div>'
-      + '<div class="field mt12"><div class="field-label">联系人</div><input class="inp" id="sl-contact" placeholder="姓名" style="text-align:left"></div>'
-      + '<div class="field mt12"><div class="field-label">联系电话</div><input class="inp" id="sl-phone" placeholder="手机号" style="text-align:left"></div>'
+    var html = '<div class="card mt12"><div class="card-title">预订信息</div>'
+      + '<div class="field mt8"><div class="field-label">客户/团队</div><input class="inp" id="sl-cust" placeholder="必填，如：XX旅行社" style="text-align:left"></div>'
+      + '<div class="field"><div class="field-label">联系人</div><input class="inp" id="sl-contact" placeholder="选填" style="text-align:left"></div>'
+      + '<div class="field"><div class="field-label">电话</div><input class="inp" id="sl-phone" placeholder="选填" style="text-align:left"></div>'
+      + '<div class="field"><div class="field-label">入住</div><input class="inp" id="sl-in" type="date" value="' + U.ymd() + '" style="text-align:right"></div>'
+      + '<div class="field"><div class="field-label">离店</div><input class="inp" id="sl-out" type="date" value="' + U.ymd(Date.now() + 86400000) + '" style="text-align:right"></div>'
       + '</div>';
 
-    html += '<div class="card"><div class="card-title">2. 日期</div>'
-      + '<div class="row-b mt12"><div class="t-md">入住</div><input class="inp" id="sl-in" type="date" value="' + U.ymd() + '" style="width:150px;text-align:right"></div>'      + '<div class="row-b mt12"><div class="t-md">离店</div><input class="inp" id="sl-out" type="date" value="' + U.ymd(Date.now() + 86400000) + '" style="width:150px;text-align:right"></div>'
-      + '</div>';
-
-    html += '<div class="card"><div class="card-title">3. 房型与数量</div>'
+    html += '<div class="card"><div class="card-head"><div class="card-title">房型与数量</div><div class="card-more">至少选 1 间</div></div>'
       + '<div class="list" style="margin:0">' + types.map(function (t) {
         var it = (f.roomTypes || []).filter(function (x) { return x.type === t.name; })[0];
         return '<div class="li"><div class="grow"><div class="t-md">' + U.esc(t.name) + '</div></div>'
-          + '<div class="row" style="gap:8px;flex:none">'
+          + '<div class="row" style="gap:6px;flex:none">'
           + '<div class="btn btn-ghost btn-sm" data-act="sl-qty" data-t="' + U.esc(t.name) + '" data-v="-1">−</div>'
           + '<div class="t-md t-w6" style="min-width:22px;text-align:center">' + (it ? it.qty : 0) + '</div>'
           + '<div class="btn btn-ghost btn-sm" data-act="sl-qty" data-t="' + U.esc(t.name) + '" data-v="1">＋</div>'
           + '</div></div>';
-      }).join('') + '</div></div>';
-
-    html += '<div class="card"><div class="card-title">4. 价格与早餐</div>'
-      + '<div class="field mt12"><div class="field-label">成交/协议价格（选填）</div><input class="inp" id="sl-price" placeholder="如：328/间夜" style="text-align:left"></div>'
-      + '<div class="row-b mt12"><div class="t-md">是否含早餐</div>'
-      + '<div class="btn ' + (f.breakfast ? 'btn-primary' : 'btn-ghost') + ' btn-sm" data-act="sl-bf">' + (f.breakfast ? '含' : '不含') + '</div></div>'
-      + (f.breakfast ? '<div class="row-b mt12"><div class="t-md">早餐份数</div>'
-        + '<div class="num-step"><button data-act="sl-bf-minus">−</button><div class="n" id="sl-bf-n" style="font-size:18px">' + (f.breakfastCount || 0) + '</div><button data-act="sl-bf-plus">＋</button></div></div>' : '')
-      + '<textarea class="inp mt12" id="sl-req" placeholder="特殊要求（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:66px"></textarea>'
+      }).join('') + '</div>'
+      + '<div class="field"><div class="field-label">协议价</div><input class="inp" id="sl-price" placeholder="选填，如 328/间夜" style="text-align:left"></div>'
+      + '<div class="row-b mt8"><div class="t-md">早餐</div>'
+      + '<div class="btn ' + (f.breakfast ? 'btn-primary' : 'btn-ghost') + ' btn-sm" data-act="sl-bf">' + (f.breakfast ? '含早餐' : '不含') + '</div></div>'
+      + (f.breakfast ? '<div class="row-b mt8"><div class="t-sm c2">早餐份数（不填默认按房间数）</div>'
+        + '<div class="num-step"><button data-act="sl-bf-minus">−</button><div class="n" id="sl-bf-n">' + (f.breakfastCount || 0) + '</div><button data-act="sl-bf-plus">＋</button></div></div>' : '')
+      + '<textarea class="inp mt8" id="sl-req" placeholder="特殊要求（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:52px"></textarea>'
       + '</div>';
 
-    html += '<div class="btn btn-primary btn-block mt16" data-act="sl-submit">提交给前厅确认</div>';
+    html += '<div class="pad mt12"><div class="btn btn-primary btn-block" data-act="sl-submit">提交给前厅确认</div>'
+      + '<div class="t-xs c3 center mt8">销售只需报清客户、日期和房量；前厅收到后在 PMS 完成预订并回传结果。</div></div>';
     return html;
   }
 });
@@ -19445,6 +19504,9 @@ App.page('catering', {
     var foodPurchaseOn = Policy.businessEnabled('food_purchase', u.hotelId);
     var isFB = Policy.can(u, 'purchase_food') || Policy.can(u, 'catering') || Policy.can(u, 'accept_food')
       || Policy.can(u, 'breakfast_actual') || Policy.can(u, 'meal_actual');
+    var isFrontOnly = Policy.can(u, 'breakfast_forecast') && !isFB;
+    var canFoodWork = Policy.can(u, 'purchase_food') || Policy.can(u, 'accept_food');
+    var canViewStats = Policy.can(u, 'view_stats');
     var html = '';
     if (!restaurantOn) {
       html += '<div class="card mt12" style="border-left:3px solid var(--orange)"><div class="card-title">当前门店未启用餐厅业务</div>'
@@ -19483,6 +19545,10 @@ App.page('catering', {
         + '<div class="btn btn-green btn-block mt12" data-act="bf-actual">录入实际人数</div></div>';
     }
 
+    /* 前厅进入餐饮页的唯一任务是早餐预计：完成这部分后就结束，不把团餐、员工餐、
+     * 食材采购和经营统计塞给前厅。 */
+    if (isFrontOnly) return html;
+
     /* ---------- 团餐 ---------- */
     var tb = TeamMeal.board();
     html += '<div class="card"><div class="card-head"><div class="card-title">今日团餐（' + tb.today.length + '）</div>'
@@ -19512,7 +19578,7 @@ App.page('catering', {
       + '<div class="t-xs c3 mt8">员工餐是员工自己吃不吃，与住客早餐、团餐互不影响。</div></div>';
 
     /* ---------- 食材采购与待验收 ---------- */
-    if (isFB) {
+    if (canFoodWork) {
       var todo = Engine.Purchase.pendingFor(me.id).filter(function (p) { return p.kind === 'food'; });
       var waitAccept = todo.filter(function (p) { return p.status === 'receiving' || p.status === 'exception'; });
       html += '<div class="card"><div class="card-head"><div class="card-title">食材采购待办（' + todo.length + '）</div>'
@@ -19528,16 +19594,18 @@ App.page('catering', {
         + '</div>';
     }
 
-    /* ---------- 月度统计 ---------- */
-    var r = Engine.Stats.range('30');
-    var bs = Breakfast.stats(r.from, r.to);
-    var ts = TeamMeal.stats(U.ymd(r.from), U.ymd(r.to));
-    html += '<div class="card"><div class="card-title">近 30 天（三套口径互不串）</div>'
-      + '<table class="mini-table mt12"><tr><th>口径</th><th class="num">天数</th><th class="num">预计</th><th class="num">实际</th><th class="num">差异</th></tr>'
-      + '<tr><td>客人早餐</td><td class="num">' + (bs.enabled ? bs.days : '未启用') + '</td><td class="num">' + (bs.enabled ? bs.sumForecast : '—') + '</td><td class="num">' + (bs.enabled ? bs.sumActual : '—') + '</td><td class="num">' + (bs.enabled ? bs.sumDiff : '—') + '</td></tr>'
-      + '<tr><td>团餐</td><td class="num">' + ts.total + '</td><td class="num">' + ts.people + '</td><td class="num">' + ts.actual + '</td><td class="num">' + ts.diff + '</td></tr>'
-      + (function () { var ms = Engine.Stats.meal ? Engine.Stats.meal(r) : null; return '<tr><td>员工餐</td><td class="num">' + (ms && ms.enabled ? '—' : '未启用') + '</td><td class="num">' + (ms && ms.enabled ? ms.totalExpect : '—') + '</td><td class="num">' + (ms && ms.enabled ? ms.totalActual : '—') + '</td><td class="num">—</td></tr>'; })()
-      + '</table></div>';
+    /* ---------- 月度统计：只给管理/数据岗位，一线员工不需要每天扫过经营统计 ---------- */
+    if (canViewStats) {
+      var r = Engine.Stats.range('30');
+      var bs = Breakfast.stats(r.from, r.to);
+      var ts = TeamMeal.stats(U.ymd(r.from), U.ymd(r.to));
+      html += '<div class="card"><div class="card-title">近 30 天经营数据</div>'
+        + '<table class="mini-table mt12"><tr><th>口径</th><th class="num">天数</th><th class="num">预计</th><th class="num">实际</th><th class="num">差异</th></tr>'
+        + '<tr><td>客人早餐</td><td class="num">' + (bs.enabled ? bs.days : '未启用') + '</td><td class="num">' + (bs.enabled ? bs.sumForecast : '—') + '</td><td class="num">' + (bs.enabled ? bs.sumActual : '—') + '</td><td class="num">' + (bs.enabled ? bs.sumDiff : '—') + '</td></tr>'
+        + '<tr><td>团餐</td><td class="num">' + ts.total + '</td><td class="num">' + ts.people + '</td><td class="num">' + ts.actual + '</td><td class="num">' + ts.diff + '</td></tr>'
+        + (function () { var ms = Engine.Stats.meal ? Engine.Stats.meal(r) : null; return '<tr><td>员工餐</td><td class="num">' + (ms && ms.enabled ? '—' : '未启用') + '</td><td class="num">' + (ms && ms.enabled ? ms.totalExpect : '—') + '</td><td class="num">' + (ms && ms.enabled ? ms.totalActual : '—') + '</td><td class="num">—</td></tr>'; })()
+        + '</table></div>';
+    }
     return html;
   }
 });
@@ -20932,6 +21000,13 @@ window.AcceptanceTest = {
     { id: 'u_9', label: '工程员工 · 吴国庆' },
     { id: 'u_10', label: '工程员工 · 郭强' },
     { id: 'u_8', label: '工程负责人/主管 · 张伟' },
+    { id: 'u_13', label: '销售负责人 · 胡涛' },
+    { id: 'u_12', label: '厨师 · 餐厅申购' },
+    { id: 'u_17', label: '厨工 · 早餐/验收' },
+    { id: 'u_11', label: '餐厅负责人 · 林芳' },
+    { id: 'u_15', label: '采购专员 · 邓超' },
+    { id: 'u_s1', label: '供应商 · 鲜达农产品' },
+    { id: 'u_s2', label: '供应商 · 广盛餐饮' },
     { id: 'u_1', label: '店长 · 周明远' },
     { id: 'u_16', label: '投资人 · 陈立仁' }
   ]
