@@ -6369,6 +6369,28 @@ window.Engine = (function () {
   };
 
   /* ---------------- 通用小工具 ---------------- */
+  function notificationIsActionable(n) {
+    if (!n) return false;
+    if (!n.refType || !n.refId) return !n.read;
+    if (n.refType === 'task') {
+      var t = DB.byId('tasks', n.refId);
+      return !!t && ['done','closed','canceled'].indexOf(t.status) < 0;
+    }
+    if (n.refType === 'workorder') {
+      var w = DB.byId('workOrders', n.refId);
+      return !!w && w.status !== 'done';
+    }
+    if (n.refType === 'purchase') {
+      var p = DB.byId('purchases', n.refId);
+      return !!p && ['done','closed','canceled'].indexOf(p.status) < 0;
+    }
+    if (n.refType === 'room') {
+      var r = DB.byId('rooms', n.refId);
+      return !!r && (r.inspStatus === 'pending' || r.inspStatus === 'recheck' || !!r.blockStatus);
+    }
+    return !n.read;
+  }
+
   function notify(userId, o) {
     if (!userId) return null;
     // 同一引用的“同一阶段提醒”5 分钟内不重复推送。
@@ -6698,10 +6720,13 @@ window.Engine = (function () {
       return { ok: true, task: DB.byId('tasks', id) };
     },
 
-    /** 是否超时：执行已完成（含待验收）不再计超时 */
+    /** 是否超时：进行中看当前时间；已完成/待验收保留“是否曾超时”的历史事实。 */
     isOverdue: function (t) {
       if (!t || !t.dueAt) return false;
-      if (t.status === 'done' || t.status === 'closed' || t.status === 'waitcheck') return false;
+      if (t.status === 'done' || t.status === 'closed' || t.status === 'waitcheck') {
+        var endAt = t.completedAt || t.verifiedAt || 0;
+        return !!endAt && endAt > t.dueAt;
+      }
       return Date.now() > t.dueAt;
     },
 
@@ -6775,19 +6800,27 @@ window.Engine = (function () {
       return list.sort(function (a, b) { return b.createdAt - a.createdAt; });
     },
 
-    /** 今日任务（按创建时间属于今天） */
+    /** 今日创建任务（保留给报表/历史查询使用）。 */
     todayAll: function () {
       var key = U.ymd();
       if (!ServiceGuard.check({ hotelId: AuthContext.scope().hotelId, action: 'read', scope: 'task' }).ok) return [];
       return DB.find('tasks', function (t) { return Task.canRead(t, Session.me) && U.ymd(t.createdAt) === key; });
     },
 
-    /** 统计：今日概览 */
-    todayStat: function () {
-      var list = Task.todayAll();
-      var done = list.filter(function (t) { return t.status === 'done' || t.status === 'closed'; }).length;
-      var overdue = list.filter(Task.isOverdue).length;
-      return { total: list.length, done: done, open: list.length - done, overdue: overdue };
+    /** 员工工作台概览：当前待办 / 今日完成 / 当前超时。
+     * 跨日遗留任务今天完成，也应进入“今日完成”；历史超时事实由 isOverdue 保留。 */
+    todayStat: function (userId) {
+      var uid = userId || (Session.me && Session.me.id);
+      var list = Task.mine(uid, { openOnly: false });
+      var open = list.filter(function (t) { return t.status !== 'done' && t.status !== 'closed'; });
+      var key = U.ymd();
+      var done = list.filter(function (t) {
+        if (t.status !== 'done' && t.status !== 'closed') return false;
+        var at = t.completedAt || t.verifiedAt || 0;
+        return !!at && U.ymd(at) === key;
+      }).length;
+      var overdue = open.filter(Task.isOverdue).length;
+      return { total: open.length, done: done, open: open.length, overdue: overdue };
     }
   };
 
@@ -9759,12 +9792,58 @@ window.Engine = (function () {
       }[type];
       return table ? DB.byId(table, id) : null;
     },
+    _canReadOwner: function (type, owner, user) {
+      user = user || Session.me;
+      if (!owner || !user) return false;
+      if (type === 'task') return Task.canRead(owner, user);
+      if (type === 'purchase') return Purchase.canSee(owner, user.id);
+      if (type === 'workorder') {
+        var wt = owner.taskId ? DB.byId('tasks', owner.taskId) : null;
+        return (wt && Task.canRead(wt, user)) || owner.assigneeId === user.id || owner.creatorId === user.id
+          || Policy.can(user, 'maintain') || Policy.can(user, 'view_stats');
+      }
+      if (type === 'breakfast') {
+        return Policy.can(user, 'breakfast_forecast') || Policy.can(user, 'breakfast_actual') || Policy.can(user, 'view_stats');
+      }
+      if (type === 'inspection') {
+        return owner.inspectorId === user.id || Policy.can(user, 'inspect') || Policy.can(user, 'view_stats');
+      }
+      if (type === 'clean') {
+        var ct = owner.taskId ? DB.byId('tasks', owner.taskId) : null;
+        return (ct && Task.canRead(ct, user)) || owner.userId === user.id || owner.cleanerId === user.id
+          || owner.assigneeId === user.id || Policy.can(user, 'inspect') || Policy.can(user, 'view_stats');
+      }
+      if (type === 'room') {
+        return Policy.can(user, 'frontdesk') || Policy.can(user, 'clean') || Policy.can(user, 'inspect')
+          || Policy.can(user, 'maintain') || Policy.can(user, 'manage_space') || Policy.can(user, 'view_stats');
+      }
+      return false;
+    },
+    _canWriteOwner: function (type, owner, user) {
+      user = user || Session.me;
+      if (!Attachment._canReadOwner(type, owner, user)) return false;
+      if (type === 'task') {
+        return owner.creatorId === user.id || owner.assigneeId === user.id || owner.claimBy === user.id
+          || (!owner.assigneeId && owner.poolCap && Policy.can(user, owner.poolCap))
+          || Guard.scopeOf(user) === 'dept' || Guard.scopeOf(user) === 'all' || Guard.scopeOf(user) === 'wide';
+      }
+      if (type === 'workorder') return owner.assigneeId === user.id || owner.creatorId === user.id || Policy.can(user, 'maintain');
+      if (type === 'purchase') return Purchase.canSee(owner, user.id);
+      if (type === 'breakfast') return Policy.can(user, 'breakfast_forecast') || Policy.can(user, 'breakfast_actual');
+      if (type === 'inspection') return Policy.can(user, 'inspect');
+      if (type === 'clean') return owner.userId === user.id || owner.cleanerId === user.id || owner.assigneeId === user.id || Policy.can(user, 'inspect');
+      if (type === 'room') return Policy.can(user, 'frontdesk') || Policy.can(user, 'clean') || Policy.can(user, 'inspect') || Policy.can(user, 'maintain') || Policy.can(user, 'manage_space');
+      return false;
+    },
     create: function (o) {
       o = o || {};
       var owner = Attachment._owner(o.ownerType, o.ownerId);
       if (!owner) return { ok: false, reason: '附件所属业务对象不存在' };
       var g = ServiceGuard.check({ record: owner, action: 'attachment.write', scope: 'attachment', write: true });
       if (!g.ok) return g;
+      if (!Attachment._canWriteOwner(o.ownerType, owner, Session.me)) {
+        return { ok: false, reason: '你没有向该业务对象添加附件的权限' };
+      }
       var a = DB.insert('attachments', AuthContext.stamp({
         id: U.uid('att'), ownerType: o.ownerType, ownerId: o.ownerId,
         name: o.name || '附件', mime: o.mime || '', size: Number(o.size) || 0,
@@ -9784,11 +9863,8 @@ window.Engine = (function () {
         : (a.ownerType === 'task' || a.ownerType === 'workorder' ? 'task' : 'room');
       var og = ServiceGuard.check({ record: owner, action: 'attachment.read', scope: ownerScope });
       if (!og.ok) return og;
-      if (a.ownerType === 'task' && !Task.canRead(owner, Session.me)) {
-        return { ok: false, reason: '你没有查看该附件所属任务的权限' };
-      }
-      if (a.ownerType === 'purchase' && !Purchase.canSee(owner, Session.me.id)) {
-        return { ok: false, reason: '你没有查看该附件所属采购单的权限' };
+      if (!Attachment._canReadOwner(a.ownerType, owner, Session.me)) {
+        return { ok: false, reason: '你没有查看该附件所属业务对象的权限' };
       }
       return { ok: true, attachment: {
         id: a.id, ownerType: a.ownerType, ownerId: a.ownerId,
@@ -9879,7 +9955,9 @@ window.Engine = (function () {
 
       var rank = { alert: 0, doing: 1, confirm: 2, temporary: 3, waiting: 4 };
       return out.sort(function (a, b) {
-        return (rank[a.statusGroup] || 9) - (rank[b.statusGroup] || 9)
+        var ar = Object.prototype.hasOwnProperty.call(rank, a.statusGroup) ? rank[a.statusGroup] : 9;
+        var br = Object.prototype.hasOwnProperty.call(rank, b.statusGroup) ? rank[b.statusGroup] : 9;
+        return ar - br
           || ((b.priority === 'urgent' ? 3 : b.priority === 'high' ? 2 : 1) - (a.priority === 'urgent' ? 3 : a.priority === 'high' ? 2 : 1))
           || (a.dueAt || Number.MAX_SAFE_INTEGER) - (b.dueAt || Number.MAX_SAFE_INTEGER);
       });
@@ -9917,7 +9995,7 @@ window.Engine = (function () {
     Decision: Decision,
     Inspection: Inspection, Org: Org,
     Handover: Handover, Escalate: Escalate, Stats: Stats, Audit: Audit, Attachment: Attachment, MyWork: MyWork,
-    notify: notify, log: log, deptHead: deptHead, deptStaff: deptStaff, gm: gm, issueType: issueType,
+    notify: notify, notificationIsActionable: notificationIsActionable, log: log, deptHead: deptHead, deptStaff: deptStaff, gm: gm, issueType: issueType,
     pickMember: pickMember,
     boot: boot
   };
@@ -12503,7 +12581,9 @@ function homeStaff(me) {
   var myWork = Engine.MyWork ? Engine.MyWork.list(me.id) : [];
   var hour = new Date().getHours();
   var greet = hour < 6 ? '夜班辛苦了' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
-  var unread = DB.find('notifications', function (n) { return n.userId === me.id && !n.read; }).length;
+  var unread = DB.find('notifications', function (n) {
+    return n.userId === me.id && !n.read && (!Engine.notificationIsActionable || Engine.notificationIsActionable(n));
+  }).length;
 
   /* ---- 头部 ---- */
   var html = '<div class="row-b pad" style="padding-top:18px">'
@@ -12564,7 +12644,9 @@ function homeStaff(me) {
     }).join('') + '</div></div>';
 
   /* ---- 我的消息（只显示需要本人处理的） ---- */
-  var msgs = DB.find('notifications', function (n) { return n.userId === me.id && !n.read; })
+  var msgs = DB.find('notifications', function (n) {
+    return n.userId === me.id && !n.read && (!Engine.notificationIsActionable || Engine.notificationIsActionable(n));
+  })
     .sort(function (a, b) { return b.createdAt - a.createdAt; }).slice(0, 3);
   html += '<div class="card"><div class="card-head"><div class="card-title">需要我处理'
     + (unread ? ' <span class="chip chip-red">' + unread + '</span>' : '') + '</div>'
@@ -12602,7 +12684,6 @@ function staffEntries(u) {
   /* 工程：工单、会议设备、工程采购、待验收、扫码 */
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'maintain')) {
     add('go-mywo', '工程工单', '🛠️', '#fdf1e5');
-    add('go-meeting', '会议设备', '🏛', '#eaf1fd');
   }
   /* 前厅：客房作业发起、销售预订待确认、住客早餐、今日会议、客诉 */
   if (Policy.can(u, 'frontdesk')) {
@@ -13037,15 +13118,30 @@ App.page('tasks', {
     if (statusFilter === 'overdue') list = list.filter(Engine.Task.isOverdue);
     if (r.params.type) list = list.filter(function (t) { return t.type === r.params.type; });
 
-    var tabs = [{ k: 'mine', n: Policy.can(me, 'maintain') ? '工程任务' : '我的任务' }];
+    /* “我的工作”使用 V1.1 聚合队列：维修、清扫、查房、采购验收、餐饮收尾等从一个入口进入。
+     * 本部门/全部仍保留普通任务视角，供主管查看。 */
+    var useMyWork = tab === 'mine' && statusFilter !== 'done';
+    var workList = useMyWork && Engine.MyWork ? Engine.MyWork.list(me.id) : [];
+    if (useMyWork) {
+      if (statusFilter === 'overdue') workList = workList.filter(function (w) { return w.statusGroup === 'alert'; });
+      else if (statusFilter === 'checking') workList = workList.filter(function (w) {
+        if (w.statusGroup === 'confirm') return true;
+        if (w.refType !== 'task') return false;
+        var t = DB.byId('tasks', w.refId);
+        return t && (t.status === 'checking' || t.status === 'waitcheck');
+      });
+      else workList = workList.filter(function (w) { return w.statusGroup !== 'confirm'; });
+    }
+
+    var tabs = [{ k: 'mine', n: '我的工作' }];
     if (S.isManager() || S.canSeeAll()) tabs.push({ k: 'dept', n: '本部门' });
     if (S.canSeeAll() || S.isManager()) tabs.push({ k: 'all', n: '全部' });
 
-    var stat = Engine.Task.todayStat();
+    var stat = Engine.Task.todayStat(me.id);
     var html = '<div class="card" style="margin-top:12px"><div class="kpi-grid c3">'
-      + '<div class="kpi"><div class="v">' + stat.total + '</div><div class="k">今日任务</div></div>'
-      + '<div class="kpi"><div class="v c-green">' + stat.done + '</div><div class="k">已完成</div></div>'
-      + '<div class="kpi"><div class="v ' + (stat.overdue ? 'c-red' : '') + '">' + stat.overdue + '</div><div class="k">超时</div></div>'
+      + '<div class="kpi"><div class="v">' + stat.total + '</div><div class="k">当前待办</div></div>'
+      + '<div class="kpi"><div class="v c-green">' + stat.done + '</div><div class="k">今日完成</div></div>'
+      + '<div class="kpi"><div class="v ' + (stat.overdue ? 'c-red' : '') + '">' + stat.overdue + '</div><div class="k">当前超时</div></div>'
       + '</div></div>';
 
     html += Comp.seg(tabs, tab, 'task-tab');
@@ -13056,12 +13152,31 @@ App.page('tasks', {
       return '<div class="pill' + (statusFilter === x.k ? ' on' : '') + '" data-act="task-filter" data-s="' + x.k + '">' + x.n + '</div>';
     }).join('') + '</div>';
 
-    html += list.length
-      ? '<div class="list">' + list.slice(0, 60).map(Comp.taskRow).join('') + '</div>'
-      : Comp.empty(statusFilter === 'done' ? '暂无已完成任务' : '没有待处理任务，今天很轻松', '✅');
-    if (list.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + list.length + ' 条</div>';
+    if (useMyWork) {
+      html += workList.length ? '<div class="list">' + workList.slice(0, 60).map(function (w) {
+        var chip = w.statusGroup === 'alert' ? '<span class="chip chip-red">异常/超时</span>'
+          : w.statusGroup === 'doing' ? '<span class="chip chip-blue">进行中</span>'
+          : w.statusGroup === 'confirm' ? '<span class="chip chip-orange">待确认/验收</span>'
+          : w.statusGroup === 'temporary' ? '<span class="chip">临时任务</span>'
+          : '<span class="chip">待接收</span>';
+        return '<div class="li" data-act="task-mywork-open" data-route="' + U.esc(w.route || '') + '">'
+          + '<div class="grow"><div class="t-md t-w6">' + U.esc(w.title) + ' ' + chip + '</div>'
+          + '<div class="t-xs c3 mt8">' + U.esc(w.subtitle || '') + '</div></div><div class="li-arrow">›</div></div>';
+      }).join('') + '</div>' : Comp.empty(statusFilter === 'checking' ? '暂无待确认/验收事项' : '当前没有需要处理的工作', '✅');
+      if (workList.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + workList.length + ' 条</div>';
+    } else {
+      html += list.length
+        ? '<div class="list">' + list.slice(0, 60).map(Comp.taskRow).join('') + '</div>'
+        : Comp.empty(statusFilter === 'done' ? '暂无已完成任务' : '没有待处理任务', '✅');
+      if (list.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + list.length + ' 条</div>';
+    }
     return html;
   }
+});
+
+App.act('task-mywork-open', function (el) {
+  var route = el.getAttribute('data-route');
+  if (route) App.go(route);
 });
 
 App.act('task-tab', function (el) {
@@ -13117,7 +13232,9 @@ App.page('task', {
       + Comp.field('要求完成', U.mdhm(t.dueAt))
       + ((t.issueTypeName || t.category) ? Comp.field('问题分类', U.esc(t.issueTypeName || t.category)) : '')
       + (t.cost ? Comp.field('相关成本', U.money(t.cost)) : '')
-      + Comp.field('是否超时', overdue ? '<span class="c-red">已超时</span>' : '<span class="c-green">未超时</span>')
+      + Comp.field('时效', overdue
+        ? '<span class="c-red">' + ((t.status === 'done' || t.status === 'closed') ? '超时完成' : '已超时') + '</span>'
+        : '<span class="c-green">' + ((t.status === 'done' || t.status === 'closed') ? '按时完成' : '未超时') + '</span>')
       + (t.acceptResult ? Comp.field('验收结果', U.esc(t.acceptResult === 'pass' ? '通过' : '不通过') + ' · ' + U.esc(DB.userName(t.acceptorId))) : '')
       + '</div>';
 
@@ -17032,13 +17149,19 @@ App.page('messages', {
   title: '我的消息',
   render: function () {
     var me = Engine.Session.user();
+    /* 已完成/已关闭业务对应的旧行动提醒自动退出“未读待处理”，但历史消息仍保留。 */
+    DB.find('notifications', function (n) {
+      return n.userId === me.id && !n.read && Engine.notificationIsActionable && !Engine.notificationIsActionable(n);
+    }).forEach(function (n) { DB.update('notifications', n.id, { read: 1, retiredAt: Date.now() }); });
     var list = DB.find('notifications', function (n) { return n.userId === me.id; })
       .sort(function (a, b) { return b.createdAt - a.createdAt; });
-    var unread = list.filter(function (n) { return !n.read; }).length;
+    var unread = list.filter(function (n) {
+      return !n.read && (!Engine.notificationIsActionable || Engine.notificationIsActionable(n));
+    }).length;
 
     var html = '<div class="card mt12"><div class="row-b">'
-      + '<div><div class="t-md t-w6">未读消息 ' + unread + ' 条</div>'
-      + '<div class="t-xs c3 mt8">只显示需要你本人采取行动的事项</div></div>'
+      + '<div><div class="t-md t-w6">待我处理 ' + unread + ' 条</div>'
+      + '<div class="t-xs c3 mt8">已处理事项自动退出未读待办；下方保留消息记录</div></div>'
       + (unread ? '<div class="btn btn-ghost btn-sm" data-act="read-all">全部已读</div>' : '') + '</div></div>';
 
     html += list.length ? '<div class="list">' + list.slice(0, 50).map(function (n) {
@@ -20235,6 +20358,7 @@ window.AcceptanceTest = {
   accounts: [
     { id: 'u_3', label: '前厅员工 · 陈思远' },
     { id: 'u_6', label: '客房员工 · 刘小红' },
+    { id: 'u_5', label: '客房主管 · 赵桂芳' },
     { id: 'u_9', label: '工程员工 · 吴国庆' },
     { id: 'u_10', label: '工程员工 · 郭强' },
     { id: 'u_8', label: '工程负责人/主管 · 张伟' },
@@ -20244,13 +20368,27 @@ window.AcceptanceTest = {
 };
 
 document.addEventListener('DOMContentLoaded', function () {
-  /* 验收版迁移：历史演示数据不得混入“今天我要做什么”。
-   * 只清理 seed 生成的 t_his_* 历史未完成项，不碰人工验收产生的真实测试链路。 */
+  /* 验收版基线：seed 自带演示待办不能混入人工验收。
+   * 只归档明确的 seed ID；人工验收现场产生的真实链路不受影响。 */
   DB.find('tasks', function (t) {
-    return /^t_his_/.test(t.id || '') && t.status !== 'done' && t.status !== 'closed';
+    return /^t_(his_|wo_|today_)/.test(t.id || '') && ['done','closed','canceled'].indexOf(t.status) < 0;
   }).forEach(function (t) {
-    DB.update('tasks', t.id, { status: 'done', completedAt: t.completedAt || t.createdAt || Date.now(), result: t.result || '历史演示数据已归档' });
+    DB.update('tasks', t.id, {
+      status: 'done', completedAt: t.completedAt || t.createdAt || Date.now(),
+      result: t.result || '验收版 seed 演示数据已归档'
+    });
   });
+  DB.find('workOrders', function (w) {
+    return /^wo_(today_|\d+$)/.test(w.id || '') && w.status !== 'done';
+  }).forEach(function (w) {
+    DB.update('workOrders', w.id, {
+      status: 'done', finishAt: w.finishAt || w.createdAt || Date.now(),
+      result: w.result || '验收版 seed 演示数据已归档'
+    });
+  });
+  /* seed 自带未读提醒只为演示正式首页；人工验收版默认不展示这些预置消息。 */
+  DB.find('notifications', function (n) { return /^n_\d+$/.test(n.id || ''); })
+    .forEach(function (n) { DB.remove('notifications', n.id); });
   /* 兼容本轮验收已经产生的旧数据：报修发生在修复代码部署前时，自动把同房间已完成工程单找回到未结束清扫。
    * 只在验收版执行，避免要求测试人员重做 803 整条链路。 */
   DB.find('roomClean', function (x) { return !x.endedAt && !x.repairResolvedAt; }).forEach(function (cl) {
@@ -20266,16 +20404,27 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var bar = document.createElement('div');
   bar.className = 'acceptance-bar';
-  bar.innerHTML = '<div><b>人工验收测试版</b><span>共享正式业务 localStorage；切换身份不会清空数据</span></div>'
+  bar.innerHTML = '<div><b>人工验收测试版</b><span>验收数据保存在当前浏览器；需要重新开始时可一键重置</span></div>'
+    + '<div style="display:flex;align-items:center;gap:10px"><button id="acceptance-reset" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">重置验收数据</button>'
     + '<label>测试身份 <select id="acceptance-role">'
     + AcceptanceTest.accounts.map(function (a) {
       return '<option value="' + a.id + '">' + U.esc(a.label) + '</option>';
-    }).join('') + '</select></label>';
+    }).join('') + '</select></label></div>';
   document.body.insertBefore(bar, document.body.firstChild);
   var select = document.getElementById('acceptance-role');
+  var resetBtn = document.getElementById('acceptance-reset');
+  var resetUser = '';
+  try { resetUser = sessionStorage.getItem('hotel_acceptance_reset_user') || ''; sessionStorage.removeItem('hotel_acceptance_reset_user'); } catch (e) {}
+  if (resetUser && DB.byId('users', resetUser)) Engine.Session.set(resetUser);
   var me = Engine.Session.user();
   if (me && AcceptanceTest.accounts.some(function (a) { return a.id === me.id; })) select.value = me.id;
   else select.value = 'u_3';
+  resetBtn.addEventListener('click', function () {
+    if (!window.confirm('确认重置人工验收数据？当前浏览器里本轮验收产生的任务、消息和操作记录会清空，然后恢复到干净验收基线。')) return;
+    try { sessionStorage.setItem('hotel_acceptance_reset_user', select.value || 'u_3'); } catch (e) {}
+    DB.reset();
+    location.reload();
+  });
   select.addEventListener('change', function () {
     Engine.Session.set(select.value);
     Engine.boot();
