@@ -4478,7 +4478,6 @@ window.Breakfast = (function () {
     if (!cnt && cnt !== 0) return Policy.fail('请填写实际用餐人数');
     if (!d.firstAt) return Policy.fail('前厅尚未报预计人数，请先由前厅报预计');
     var photos = (o.photos || []).filter(Boolean);
-    if (!photos.length) return Policy.fail('请先拍照留存早餐结束后的剩余食品');
     DB.update('breakfastDays', d.id, {
       actual: cnt, actualBy: me.id, actualAt: Date.now(),
       leftoverPhotos: photos.slice(),
@@ -7498,12 +7497,17 @@ window.Engine = (function () {
         lunchExpect: list.filter(function (m) { return m.lunch === 1; }).length,
         dinnerExpect: list.filter(function (m) { return m.dinner === 1; }).length,
         lunchActual: d.lunchActual || 0, dinnerActual: d.dinnerActual || 0,
+        lunchActualAt: d.lunchActualAt || 0, dinnerActualAt: d.dinnerActualAt || 0,
         lunchCost: d.lunchCost || 0, dinnerCost: d.dinnerCost || 0,
+        lunchLeftoverPhotos: d.lunchLeftoverPhotos || [], dinnerLeftoverPhotos: d.dinnerLeftoverPhotos || [],
+        lunchLeftoverNote: d.lunchLeftoverNote || '', dinnerLeftoverNote: d.dinnerLeftoverNote || '',
         reported: list.length, total: DB.all('users').length
       };
     },
-    /** 开餐后记录实际人数（餐厅收尾岗位）。员工只负责申报吃/不吃，实际人数由授权餐厅人员统计。 */
-    setActual: function (which, n) {
+    /** 开餐后记录实际人数（餐厅收尾岗位）。
+     * 可同时留存剩余饭菜照片与一句话说明，用于后续判断浪费程度；照片不强制，避免增加一线负担。 */
+    setActual: function (which, n, o) {
+      o = o || {};
       var me = Session.me;
       if (!me || !Policy.can(me, 'meal_actual')) return Policy.fail('你没有员工餐实际人数统计权限');
       var scope = AuthContext.scope();
@@ -7530,12 +7534,16 @@ window.Engine = (function () {
       patch[which] = count;
       patch[which + 'By'] = me.id;
       patch[which + 'At'] = Date.now();
+      var prefix = which === 'lunchActual' ? 'lunch' : 'dinner';
+      patch[prefix + 'LeftoverPhotos'] = (o.photos || []).filter(Boolean).slice();
+      patch[prefix + 'LeftoverNote'] = o.note || '';
       if (which === 'lunchActual' && count) patch.lunchCost = Math.round(count * 13.5 * 100) / 100;
       if (which === 'dinnerActual' && count) patch.dinnerCost = Math.round(count * 15.5 * 100) / 100;
       DB.update('mealDays', d.id, patch);
       Audit.write({
         targetType: 'meal', targetId: d.id, targetName: key,
-        action: '员工餐实际人数统计', field: which, from: '', to: count, reason: ''
+        action: '员工餐实际人数统计', field: which, from: '',
+        to: count + ' 人 / ' + ((o.photos || []).filter(Boolean).length) + ' 张剩余饭菜照片', reason: o.note || ''
       });
       Meal.checkDeviation(key);
       return Meal.day(key);
@@ -9799,19 +9807,95 @@ window.Engine = (function () {
    * 十、交接班
    * ======================================================================= */
   var Handover = {
+    shiftOf: function (hour) {
+      hour = hour == null ? new Date().getHours() : Number(hour);
+      if (hour >= 7 && hour < 16) return '早班';
+      if (hour >= 16 && hour < 24) return '中班';
+      return '夜班';
+    },
+    nextShift: function (shift) {
+      return shift === '早班' ? '中班' : (shift === '中班' ? '夜班' : '早班');
+    },
     submit: function (p) {
-      var open = Task.mine(Session.me.id);
-      var ho = DB.insert('handovers', {
-        id: U.uid('ho'), date: U.ymd(), shift: p.shift || '早班→晚班', deptId: Session.deptId(),
-        userId: Session.me.id, toUserId: p.toUserId || '',
-        unfinished: p.unfinished || '', notes: p.notes || '', incident: p.incident || '',
-        taskIds: open.map(function (t) { return t.id; }), createdAt: Date.now()
+      p = p || {};
+      var me = Session.me;
+      if (!me) return Policy.fail('请先登录');
+      var to = DB.byId('users', p.toUserId || '');
+      if (!to || to.deptId !== me.deptId || to.id === me.id) return Policy.fail('请选择本部门下一班接收人');
+      var checks = p.checks || {};
+      /* 前厅三项是交班底线事实，不把日常服务动作做成冗长打勾表。 */
+      if (me.deptId === 'd_fo' && !(checks.cards && checks.cash && checks.roomState)) {
+        return Policy.fail('交班前请确认房卡、备用金、房态/制卡三项已核对');
+      }
+      var open = Task.mine(me.id);
+      var lines = (p.items || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
+      if (!lines.length && p.unfinished) {
+        lines = String(p.unfinished).split(/\n|；|;/).map(function (x) { return x.trim(); }).filter(Boolean);
+      }
+      var shift = p.shift || Handover.shiftOf();
+      var ho = DB.insert('handovers', AuthContext.stamp({
+        id: U.uid('ho'), date: U.ymd(), shift: shift, nextShift: Handover.nextShift(shift), deptId: Session.deptId(),
+        userId: me.id, toUserId: to.id,
+        checks: { cards: !!checks.cards, cash: !!checks.cash, roomState: !!checks.roomState },
+        unfinished: lines.join('；'), notes: p.notes || '', incident: p.incident || '',
+        items: lines.map(function (txt) { return { id: U.uid('hoi'), text: txt, status: 'open', closedAt: 0, closedBy: '', closeNote: '' }; }),
+        taskIds: open.map(function (t) { return t.id; }),
+        status: 'pending', acceptedAt: 0, acceptedBy: '', closedAt: 0,
+        createdAt: Date.now(), updatedAt: Date.now()
+      }));
+      notify(to.id, {
+        type: 'approve', title: shift + '交接待接收',
+        content: DB.userName(me.id) + ' → ' + Handover.nextShift(shift) + ' · ' + lines.length + ' 项重点事项 · 自动带入任务 ' + open.length + ' 项',
+        refType: 'handover', refId: ho.id
       });
-      log('提交交接班', Session.deptId());
-      return ho;
+      log('提交交接班', Session.deptId() + ' ' + shift);
+      /* 标准返回保留 {ok,handover}；同时把记录字段平铺一份，兼容旧版直接读取 taskIds/id 的调用。 */
+      return Object.assign({ ok: true, handover: ho }, ho);
+    },
+    get: function (id) {
+      var h = DB.byId('handovers', id);
+      if (!h || !AuthContext.inScope(h)) return null;
+      return h;
+    },
+    accept: function (id) {
+      var h = Handover.get(id), me = Session.me;
+      if (!h) return Policy.fail('交接记录不存在');
+      if (!me || (h.toUserId !== me.id && !Policy.can(me, 'manage_org'))) return Policy.fail('只有指定接班人可以确认接收');
+      if (h.status === 'accepted' || h.status === 'done') return Policy.ok({ handover: h, repeat: true });
+      DB.update('handovers', id, { status: 'accepted', acceptedAt: Date.now(), acceptedBy: me.id, updatedAt: Date.now() });
+      notify(h.userId, { type: 'info', title: '交接已接收', content: DB.userName(me.id) + ' 已确认接收 ' + h.shift + ' 交接', refType: 'handover', refId: id });
+      log('接收交接班', id);
+      return Policy.ok({ handover: DB.byId('handovers', id) });
+    },
+    closeItem: function (id, itemId, note) {
+      var h = Handover.get(id), me = Session.me;
+      if (!h) return Policy.fail('交接记录不存在');
+      if (!me || (h.toUserId !== me.id && h.deptId !== me.deptId && !Policy.can(me, 'manage_org'))) return Policy.fail('你不能处理该交接事项');
+      if (h.status === 'pending') return Policy.fail('请先确认接收交接');
+      var items = (h.items || []).map(function (x) {
+        if (x.id !== itemId) return x;
+        if (x.status === 'done') return x;
+        return Object.assign({}, x, { status: 'done', closedAt: Date.now(), closedBy: me.id, closeNote: note || '' });
+      });
+      var manualDone = items.every(function (x) { return x.status === 'done'; });
+      var tasksDone = (h.taskIds || []).every(function (tid) {
+        var t = DB.byId('tasks', tid);
+        return !t || ['done','closed','canceled'].indexOf(t.status) >= 0;
+      });
+      DB.update('handovers', id, {
+        items: items, status: manualDone && tasksDone ? 'done' : 'accepted',
+        closedAt: manualDone && tasksDone ? Date.now() : 0, updatedAt: Date.now()
+      });
+      log('关闭交接事项', itemId);
+      return Policy.ok({ handover: DB.byId('handovers', id) });
+    },
+    pendingFor: function (userId) {
+      return DB.find('handovers', function (h) {
+        return AuthContext.inScope(h) && h.toUserId === userId && h.status === 'pending';
+      }).sort(function (a, b) { return b.createdAt - a.createdAt; });
     },
     latest: function (deptId) {
-      var list = DB.find('handovers', function (h) { return h.deptId === deptId; })
+      var list = DB.find('handovers', function (h) { return AuthContext.inScope(h) && h.deptId === deptId; })
         .sort(function (a, b) { return b.createdAt - a.createdAt; });
       return list;
     }
@@ -10181,7 +10265,7 @@ window.Engine = (function () {
         out.push({
           id: 'breakfast:' + bf.id, refType: 'breakfast', refId: bf.id, kind: 'breakfast_actual',
           statusGroup: 'waiting', priority: 'normal',
-          title: '早餐收尾统计', subtitle: '预计 ' + bf.finalForecast + ' 人 · 实际人数 + 剩余食品照片',
+          title: '早餐收尾统计', subtitle: '预计 ' + bf.finalForecast + ' 人 · 录实际人数；有剩余可拍照',
           route: 'catering', dueAt: 0, createdAt: bf.createdAt || 0
         });
       }
@@ -10194,7 +10278,7 @@ window.Engine = (function () {
         var md = DB.findOne('mealDays', function (x) {
           return x.date === U.ymd() && x.hotelId === scope.hotelId && x.tenantId === scope.tenantId;
         }) || {};
-        if (reports.length && (!md.lunchActual || !md.dinnerActual)) {
+        if (reports.length && (!md.lunchActualAt || !md.dinnerActualAt)) {
           out.push({
             id: 'meal:' + U.ymd(), refType: 'meal', refId: U.ymd(), kind: 'meal_actual',
             statusGroup: 'waiting', priority: 'normal',
@@ -10203,6 +10287,19 @@ window.Engine = (function () {
           });
         }
       }
+
+      /* 接班是前厅当前班次的即时工作，不应只藏在消息中心。 */
+      DB.find('handovers', function (h) {
+        return AuthContext.inScope(h) && h.toUserId === me.id && h.status === 'pending';
+      }).forEach(function (h) {
+        out.push({
+          id: 'handover:' + h.id, refType: 'handover', refId: h.id, kind: 'handover',
+          statusGroup: 'confirm', priority: 'high',
+          title: '待接班 · ' + (h.shift || '上一班') + ' → ' + (h.nextShift || '下一班'),
+          subtitle: DB.userName(h.userId) + '交班 · ' + ((h.items || []).length) + ' 项重点事项',
+          route: 'handover', dueAt: 0, createdAt: h.createdAt || 0
+        });
+      });
 
       /* “我的工作”按任务产生时间倒序，最新任务固定在最上方。
        * 同一时间戳才用优先级/状态兜底，避免历史超时任务长期压住刚产生的新任务。 */
@@ -14571,10 +14668,10 @@ App.page('meal-manage', {
 
     html += '<div class="sec-title">开餐后记录实际人数</div><div class="list">'
       + '<div class="li"><div class="grow"><div class="t-md t-w6">午餐实际就餐人数</div>'
-      + '<div class="t-xs c3 mt8">' + (d.lunchActual ? '已记录：' + d.lunchActual + ' 人 · 人均 ' + U.money(d.lunchCost / (d.lunchActual || 1)) : '尚未记录') + '</div></div>'
+      + '<div class="t-xs c3 mt8">' + (d.lunchActualAt ? '已记录：' + d.lunchActual + ' 人' + (d.lunchActual ? ' · 人均 ' + U.money(d.lunchCost / d.lunchActual) : '') + (d.lunchLeftoverPhotos.length ? ' · 剩余照片 ' + d.lunchLeftoverPhotos.length + ' 张' : '') : '尚未记录') + '</div></div>'
       + '<div class="btn btn-primary btn-sm" data-act="meal-actual" data-w="lunchActual">记录</div></div>'
       + '<div class="li"><div class="grow"><div class="t-md t-w6">晚餐实际就餐人数</div>'
-      + '<div class="t-xs c3 mt8">' + (d.dinnerActual ? '已记录：' + d.dinnerActual + ' 人 · 人均 ' + U.money(d.dinnerCost / (d.dinnerActual || 1)) : '尚未记录') + '</div></div>'
+      + '<div class="t-xs c3 mt8">' + (d.dinnerActualAt ? '已记录：' + d.dinnerActual + ' 人' + (d.dinnerActual ? ' · 人均 ' + U.money(d.dinnerCost / d.dinnerActual) : '') + (d.dinnerLeftoverPhotos.length ? ' · 剩余照片 ' + d.dinnerLeftoverPhotos.length + ' 张' : '') : '尚未记录') + '</div></div>'
       + '<div class="btn btn-primary btn-sm" data-act="meal-actual" data-w="dinnerActual">记录</div></div>'
       + '</div>';
 
@@ -14597,27 +14694,49 @@ App.page('meal-manage', {
   }
 });
 
+var _mealActualPhotos = 0;
 App.act('meal-actual', function (el) {
   var w = el.getAttribute('data-w');
+  var d = Engine.Meal.day();
+  var expect = w === 'lunchActual' ? d.lunchExpect : d.dinnerExpect;
+  _mealActualPhotos = 0;
   App.sheet({
-    title: '记录实际就餐人数',
-    body: '<div class="pad" style="padding:10px 18px">'
-      + '<div class="row-b mt8"><div class="t-md">实际人数</div>'
-      + '<div class="num-step"><button data-act="mv-minus">−</button><div class="n" id="mv-n" style="font-size:20px">0</div><button data-act="mv-plus">＋</button></div></div>'
-      + '<div class="t-xs c3 mt12">系统将自动计算差异人数、食材成本与人均成本</div></div>',
+    title: (w === 'lunchActual' ? '午餐' : '晚餐') + '收尾',
+    body: '<div class="pad" style="padding:8px 14px">'
+      + '<div class="row-b"><div><div class="t-md t-w6">实际就餐人数</div><div class="t-xs c3 mt8">默认带出预计人数，按现场调整即可</div></div>'
+      + '<div class="num-step"><button data-act="mv-minus">−</button><div class="n" id="mv-n" style="font-size:20px">' + expect + '</div><button data-act="mv-plus">＋</button></div></div>'
+      + '<div class="row-b mt12"><div><div class="t-sm t-w6">剩余饭菜</div><div class="t-xs c3 mt8">有明显剩余时拍照，方便后续看浪费程度；没有可不拍。</div></div>'
+      + '<div class="btn btn-ghost btn-sm" data-act="meal-leftover-photo">📷 拍照 <span id="meal-photo-n"></span></div></div>'
+      + '<textarea class="inp mt12" id="meal-leftover-note" placeholder="剩余情况说明（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:50px"></textarea>'
+      + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
-      + '<button class="btn btn-primary grow" data-act="meal-actual-save" data-w="' + w + '">保存</button>'
+      + '<button class="btn btn-primary grow" data-act="meal-actual-save" data-w="' + w + '">保存收尾</button>'
   });
 });
-App.act('mv-plus', function () { var n = document.getElementById('mv-n'); n.textContent = Math.min(99, (+n.textContent || 0) + 1); });
+App.act('mv-plus', function () { var n = document.getElementById('mv-n'); n.textContent = Math.min(999, (+n.textContent || 0) + 1); });
 App.act('mv-minus', function () { var n = document.getElementById('mv-n'); n.textContent = Math.max(0, (+n.textContent || 0) - 1); });
-App.act('meal-actual-save', function (el) {
-  var v = +document.getElementById('mv-n').textContent;
-  if (!v) { U.toast('请输入实际人数'); return; }
-  var res = Engine.Meal.setActual(el.getAttribute('data-w'), v);
-  if (!res || res.ok === false) { U.toast((res && res.reason) || '记录失败'); return; }
-  DB.flush(); App.closeSheet(); U.toast('已记录员工餐实际人数，差异已自动生成统计'); App.refresh();
+App.act('meal-leftover-photo', function () {
+  _mealActualPhotos++;
+  var n = document.getElementById('meal-photo-n');
+  if (n) n.textContent = _mealActualPhotos + ' 张';
+  U.toast('已拍照（验收版模拟）');
 });
+App.act('meal-actual-save', function (el) {
+  var n = document.getElementById('mv-n');
+  var v = n ? +n.textContent : NaN;
+  if (isNaN(v) || v < 0) { U.toast('请输入实际人数'); return; }
+  var photos = [];
+  for (var i = 0; i < _mealActualPhotos; i++) photos.push('meal_leftover_' + Date.now() + '_' + i);
+  var res = Engine.Meal.setActual(el.getAttribute('data-w'), v, {
+    photos: photos,
+    note: ((document.getElementById('meal-leftover-note') || {}).value || '').trim()
+  });
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '记录失败'); return; }
+  DB.flush(); App.closeSheet();
+  U.toast(_mealActualPhotos ? '已记录实际人数并留存剩余饭菜照片' : '已记录员工餐实际人数');
+  App.refresh();
+});
+
 </script>
 <script>
 /* ==========================================================================
@@ -16519,67 +16638,119 @@ App.act('room-swap-submit', function () {
 <script>
 /* ==========================================================================
  * pages/ops.js —— 交接班 / SOP 巡检执行
- * 文档第十一、十二节：未完成自动带入，不重复输入；SOP 每项只点正常/异常
+ * 未完成任务自动带入；前厅交接只保留真正跨班有价值的信息，不做流水账式打勾。
  * ======================================================================= */
 
 /* ---------------- 交接班 ---------------- */
+var _hoTo = '', _hoShift = '', _hoChecks = { cards: false, cash: false, roomState: false };
+
+function hoPeers(me) {
+  return DB.find('users', function (u) {
+    return u.deptId === me.deptId && u.id !== me.id && (u.status || 'active') !== 'leave';
+  });
+}
+function hoToName() {
+  if (_hoTo) return DB.userName(_hoTo);
+  var me = Engine.Session.user(), peer = hoPeers(me)[0];
+  return peer ? peer.name : '指定同事';
+}
+function hoStateName(h) {
+  return h.status === 'done' ? '已闭环' : (h.status === 'accepted' ? '已接收' : '待接收');
+}
+function hoStateCls(h) {
+  return h.status === 'done' ? 'green' : (h.status === 'accepted' ? 'blue' : 'orange');
+}
+
 App.page('handover', {
   title: '交接班',
   render: function () {
     var me = Engine.Session.user();
+    var isFO = me.deptId === 'd_fo';
     var open = Engine.Task.mine(me.id);
-    var list = Engine.Handover.latest(me.deptId).slice(0, 5);
+    var incoming = Engine.Handover.latest(me.deptId).filter(function (h) {
+      return h.toUserId === me.id && h.status !== 'done';
+    });
+    var list = Engine.Handover.latest(me.deptId).slice(0, 6);
+    var shift = _hoShift || Engine.Handover.shiftOf();
+    var html = '';
 
-    var html = '<div class="card mt12"><div class="card-head"><div class="card-title">提交今日交班</div>'
-      + '<div class="card-more">' + U.esc(DB.deptName(me.deptId)) + ' · ' + U.md() + '</div></div>'
-      + '<div class="t-xs c3">未完成任务会自动带入，不需要重复输入</div>';
-
-    if (open.length) {
-      html += '<div class="mt12">' + open.map(function (t) {
-        return '<div class="row-b" style="padding:9px 0;border-bottom:1px solid var(--line)">'
-          + '<div class="grow"><div class="t-sm">' + U.esc(t.title) + '</div>'
-          + '<div class="t-xs c3 mt8">' + U.esc(t.location || '—') + ' · ' + U.esc(t.source) + '</div></div>'
-          + Comp.taskStatusChip(t) + '</div>';
-      }).join('') + '</div>';
-    } else {
-      html += '<div class="t-sm c-green mt12">✓ 当前没有未完成任务</div>';
+    /* 接班人先看到必须接的内容，避免被交班表单压到下面。 */
+    if (incoming.length) {
+      html += '<div class="card mt12" style="border-left:3px solid var(--orange)">'
+        + '<div class="card-head"><div class="card-title">待我接班（' + incoming.length + '）</div><div class="card-more">先处理这里</div></div>'
+        + incoming.map(function (h) {
+          var openItems = (h.items || []).filter(function (x) { return x.status !== 'done'; });
+          var taskOpen = (h.taskIds || []).filter(function (tid) {
+            var t = DB.byId('tasks', tid); return t && ['done','closed','canceled'].indexOf(t.status) < 0;
+          }).length;
+          return '<div class="card card-tight" style="margin:8px 0 0;box-shadow:none;border:1px solid var(--line)">'
+            + '<div class="row-b"><div><div class="t-md t-w6">' + U.esc(h.shift) + ' → ' + U.esc(h.nextShift || '') + '</div>'
+            + '<div class="t-xs c3 mt8">' + U.esc(DB.userName(h.userId)) + ' · ' + U.mdhm(h.createdAt) + '</div></div>'
+            + '<span class="chip chip-' + hoStateCls(h) + '">' + hoStateName(h) + '</span></div>'
+            + (h.status === 'pending'
+              ? '<button class="btn btn-primary btn-block mt12" data-act="ho-accept" data-id="' + h.id + '">确认接班</button>'
+              : '')
+            + (openItems.length ? '<div class="mt8">' + openItems.map(function (it) {
+                return '<div class="row-b" style="padding:8px 0;border-top:1px solid var(--line)">'
+                  + '<div class="grow t-sm">' + U.esc(it.text) + '</div>'
+                  + (h.status === 'accepted' ? '<button class="btn btn-green btn-sm" data-act="ho-item-done" data-id="' + h.id + '" data-item="' + it.id + '">完成</button>' : '')
+                  + '</div>';
+              }).join('') + '</div>' : '<div class="t-xs c-green mt8">✓ 手工交接事项已处理</div>')
+            + (taskOpen ? '<div class="t-xs c3 mt8">另有系统未完成任务 ' + taskOpen + ' 项，继续在“我的工作”处理，无需重复登记。</div>' : '')
+            + '</div>';
+        }).join('')
+        + '</div>';
     }
 
-    html += '<div class="mt16"><div class="t-xs c3 mb8">下一班需要关注</div>'
-      + '<textarea class="inp" id="ho-unfinished" placeholder="例如：810 房客人投诉网络慢，工程已在处理" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:70px"></textarea></div>'
-      + '<div class="mt12"><div class="t-xs c3 mb8">本班异常事件（没有可留空）</div>'
-      + '<textarea class="inp" id="ho-incident" placeholder="例如：夜间 23:40 有客人醉酒滞留前台，已由保安陪同离店" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:70px"></textarea></div>'
-      + '<div class="mt16 row-b"><div class="t-sm c3">接收人</div>'
+    html += '<div class="card mt12"><div class="card-head"><div class="card-title">本班交给下一班</div>'
+      + '<div class="card-more">' + U.esc(DB.deptName(me.deptId)) + ' · ' + U.md() + '</div></div>';
+
+    if (isFO) {
+      html += '<div class="t-xs c3">只确认三项交班底线；日常服务规范不做重复打勾。</div>'
+        + '<div class="seg mt8" style="margin-left:0;margin-right:0">'
+        + ['早班','中班','夜班'].map(function (s) {
+            return '<div class="seg-i' + (shift === s ? ' on' : '') + '" data-act="ho-shift" data-s="' + s + '">' + s + '</div>';
+          }).join('') + '</div>'
+        + '<div class="tag-wrap" style="padding:8px 0 2px">'
+        + '<div class="tag' + (_hoChecks.cards ? ' on' : '') + '" data-act="ho-check" data-k="cards">房卡已核对</div>'
+        + '<div class="tag' + (_hoChecks.cash ? ' on' : '') + '" data-act="ho-check" data-k="cash">备用金已核对</div>'
+        + '<div class="tag' + (_hoChecks.roomState ? ' on' : '') + '" data-act="ho-check" data-k="roomState">房态/制卡一致</div>'
+        + '</div>';
+    } else {
+      html += '<div class="t-xs c3">未完成系统任务自动带入，避免重复输入。</div>';
+    }
+
+    html += '<div class="mt12"><div class="t-xs c3 mb8">下一班真正需要继续跟的事</div>'
+      + '<textarea class="inp" id="ho-unfinished" placeholder="一行一件，例如：812 客人延迟退房到 15:00\n805 维修房待工程完成后解锁\n今晚 23:00 到店团队需保留同楼层" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:76px"></textarea></div>'
+      + '<div class="mt8"><div class="t-xs c3 mb8">异常/补充（没有可留空）</div>'
+      + '<textarea class="inp" id="ho-incident" placeholder="只写会影响下一班判断的异常" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:50px"></textarea></div>'
+      + '<div class="row-b mt12"><div class="t-sm c3">接收人</div>'
       + '<div class="btn btn-ghost btn-sm" data-act="ho-pick-user">' + U.esc(hoToName()) + ' ›</div></div>'
-      + '<button class="btn btn-primary btn-block btn-lg mt16" data-act="ho-submit">提交交接</button>'
+      + (open.length ? '<div class="t-xs c3 mt8">系统自动带入本人未完成任务 ' + open.length + ' 项，不再重复抄写。</div>' : '<div class="t-xs c-green mt8">✓ 当前没有本人未完成任务</div>')
+      + '<button class="btn btn-primary btn-block mt12" data-act="ho-submit">提交给下一班</button>'
       + '</div>';
 
-    html += Comp.sectionTitle('本部门交班记录');
+    html += Comp.sectionTitle('最近交接');
     html += list.length ? '<div class="list">' + list.map(function (h) {
-      return '<div class="li" style="align-items:flex-start"><div class="grow">'
-        + '<div class="row-b"><div class="t-md t-w6">' + U.esc(h.shift) + '</div><div class="t-xs c3">' + U.esc(h.date) + '</div></div>'
-        + '<div class="t-xs c2 mt8">' + U.esc(DB.userName(h.userId)) + ' → ' + U.esc(DB.userName(h.toUserId || '')) + '</div>'
-        + '<div class="t-sm mt8">' + U.esc(h.unfinished || '无未完成事项') + '</div>'
+      var remain = (h.items || []).filter(function (x) { return x.status !== 'done'; }).length;
+      return '<div class="li"><div class="grow"><div class="row-b"><div class="t-sm t-w6">' + U.esc(h.shift || '交班') + ' · ' + U.esc(DB.userName(h.userId)) + ' → ' + U.esc(DB.userName(h.toUserId || '')) + '</div>'
+        + '<span class="chip chip-' + hoStateCls(h) + '">' + hoStateName(h) + '</span></div>'
+        + '<div class="t-xs c3 mt8">' + U.mdhm(h.createdAt) + ' · 待跟进 ' + remain + ' 项 · 系统任务 ' + ((h.taskIds || []).length) + ' 项</div>'
         + (h.incident ? '<div class="t-xs c-red mt8">异常：' + U.esc(h.incident) + '</div>' : '')
-        + (h.taskIds && h.taskIds.length ? '<div class="t-xs c3 mt8">带入未完成任务 ' + h.taskIds.length + ' 项</div>' : '')
         + '</div></div>';
     }).join('') + '</div>' : Comp.empty('暂无交班记录', '🔄');
     return html;
   }
 });
 
-var _hoTo = '';
-function hoToName() {
-  if (_hoTo) return DB.userName(_hoTo);
-  var me = Engine.Session.user();
-  var peer = DB.find('users', function (u) { return u.deptId === me.deptId && u.id !== me.id; });
-  return peer.length ? peer[0].name : '指定同事';
-}
+App.act('ho-shift', function (el) { _hoShift = el.getAttribute('data-s'); App.refresh(); });
+App.act('ho-check', function (el) {
+  var k = el.getAttribute('data-k'); _hoChecks[k] = !_hoChecks[k]; App.refresh();
+});
 App.act('ho-pick-user', function () {
-  var me = Engine.Session.user();
-  var peers = DB.find('users', function (u) { return u.deptId === me.deptId && u.id !== me.id; });
+  var me = Engine.Session.user(), peers = hoPeers(me);
   App.sheet({
-    title: '选择接收人',
+    title: '选择接班人',
     body: '<div class="list">' + peers.map(function (u) {
       return '<div class="li" data-act="ho-user-pick" data-id="' + u.id + '">' + Comp.avatar(u)
         + '<div class="grow"><div class="t-md">' + U.esc(u.name) + '</div><div class="t-xs c3 mt8">' + U.esc(u.post) + '</div></div>'
@@ -16587,15 +16758,31 @@ App.act('ho-pick-user', function () {
     }).join('') + '</div>'
   });
 });
-App.act('ho-user-pick', function (el) { _hoTo = el.getAttribute('data-id'); App.closeSheet(); App.go('handover'); });
+App.act('ho-user-pick', function (el) { _hoTo = el.getAttribute('data-id'); App.closeSheet(); App.refresh(); });
 App.act('ho-submit', function () {
-  var unf = (document.getElementById('ho-unfinished') || {}).value || '';
-  var inc = (document.getElementById('ho-incident') || {}).value || '';
-  var me = Engine.Session.user();
-  var toDefault = DB.find('users', function (u) { return u.deptId === me.deptId && u.id !== me.id; })[0];
-  Engine.Handover.submit({ unfinished: unf, incident: inc, toUserId: _hoTo || (toDefault ? toDefault.id : '') });
-  _hoTo = '';
-  DB.flush(); U.toast('交班已提交，未完成任务已带入'); App.go('home');
+  var txt = ((document.getElementById('ho-unfinished') || {}).value || '').trim();
+  var inc = ((document.getElementById('ho-incident') || {}).value || '').trim();
+  var me = Engine.Session.user(), peer = hoPeers(me)[0];
+  var res = Engine.Handover.submit({
+    shift: _hoShift || Engine.Handover.shiftOf(),
+    checks: _hoChecks,
+    items: txt ? txt.split(/\n/).map(function (x) { return x.trim(); }).filter(Boolean) : [],
+    incident: inc,
+    toUserId: _hoTo || (peer ? peer.id : '')
+  });
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '交班提交失败'); return; }
+  _hoTo = ''; _hoShift = ''; _hoChecks = { cards:false, cash:false, roomState:false };
+  DB.flush(); U.toast('已提交，下一班确认接收后继续跟进'); App.go('home');
+});
+App.act('ho-accept', function (el) {
+  var res = Engine.Handover.accept(el.getAttribute('data-id'));
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '接班失败'); return; }
+  DB.flush(); U.toast('已确认接班'); App.refresh();
+});
+App.act('ho-item-done', function (el) {
+  var res = Engine.Handover.closeItem(el.getAttribute('data-id'), el.getAttribute('data-item'), '');
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '处理失败'); return; }
+  DB.flush(); U.toast('该交接事项已完成'); App.refresh();
 });
 
 /* ---------------- SOP / 巡检待执行 ---------------- */
@@ -19572,10 +19759,17 @@ App.page('catering', {
     /* ---------- 员工餐（与客人早餐分对象分统计） ---------- */
     var md = Engine.Meal.day();
     html += '<div class="card"><div class="card-head"><div class="card-title">员工餐（独立统计）</div>'
-      + (staffMealOn ? '<div class="card-more" data-act="go-meal">报备 ›</div>' : '<div class="card-more">未启用</div>') + '</div>'
+      + (staffMealOn
+        ? (Policy.can(u, 'meal_actual')
+          ? '<div class="card-more" data-act="go-meal-manage">收尾 ›</div>'
+          : '<div class="card-more" data-act="go-meal">报备 ›</div>')
+        : '<div class="card-more">未启用</div>') + '</div>'
       + '<div class="row-b t-sm"><div class="c2">今日预计 / 实际</div>'
-      + '<div>午 ' + md.lunchExpect + (md.lunchActual != null ? '/' + md.lunchActual : '') + ' · 晚 ' + md.dinnerExpect + (md.dinnerActual != null ? '/' + md.dinnerActual : '') + '</div></div>'
-      + '<div class="t-xs c3 mt8">员工餐是员工自己吃不吃，与住客早餐、团餐互不影响。</div></div>';
+      + '<div>午 ' + md.lunchExpect + '/' + (md.lunchActualAt ? md.lunchActual : '—') + ' · 晚 ' + md.dinnerExpect + '/' + (md.dinnerActualAt ? md.dinnerActual : '—') + '</div></div>'
+      + (Policy.can(u, 'meal_actual') && (!md.lunchActualAt || !md.dinnerActualAt)
+        ? '<div class="btn btn-primary btn-block mt12" data-act="go-meal-manage">记录员工餐实际人数 / 剩余饭菜</div>'
+        : '<div class="t-xs c3 mt8">员工餐是员工自己吃不吃，与住客早餐、团餐互不影响。</div>')
+      + '</div>';
 
     /* ---------- 食材采购与待验收 ---------- */
     if (canFoodWork) {
@@ -19661,7 +19855,7 @@ App.act('bf-actual', function () {
       + '<div class="t-xs c3 mt8">早餐结束后拍摄剩余食品现场，作为当天留存。</div></div>'
       + '<div class="btn btn-ghost btn-sm" data-act="bf-leftover-photo">📷 拍照 <span id="bf-photo-n"></span></div></div></div>'
       + '<textarea class="inp mt12" id="bf-actual-note" placeholder="补充说明（选填），如：剩余少量粥和面点" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>'
-      + '<div class="t-xs c3 mt12">实际人数和剩余食品照片会绑定在同一天早餐记录中。</div></div>',
+      + '<div class="t-xs c3 mt12">实际人数必须记录；如有明显剩余可拍照留存，方便后续判断浪费程度。</div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-green grow" data-act="bf-actual-save">上报收尾</button>'
   });
@@ -19682,7 +19876,7 @@ App.act('bf-actual-save', function () {
   });
   if (!res || res.ok === false) { U.toast((res && res.reason) || '保存失败'); return; }
   DB.flush(); App.closeSheet();
-  U.toast('已上报早餐实际人数和剩余食品照片');
+  U.toast(_bfActualPhotos ? '已记录早餐人数并留存剩余食品照片' : '已记录早餐实际人数');
   App.refresh();
 });
 App.act('bf-history', function () { App.go('bf-history'); });
