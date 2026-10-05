@@ -3366,6 +3366,19 @@ window.RoomSvc = (function () {
     var c = DB.byId('roomClean', cleanId);
     if (!c || !c.pausedAt) return { ok: false, reason: '未处于暂停状态' };
     var eg = ExecutionGuard.actor(c, 'cleanerId', { action: 'room.write', scope: 'room', capability: 'clean' }); if (!eg.ok) return eg;
+    /* 同一客房员工同一时刻只允许一间房真正处于“清扫中”。
+     * 恢复暂停房前，如本人正在另一间房作业，先要求显式切换，避免双房同时计时。 */
+    var otherActive = DB.findOne('roomClean', function (x) {
+      return x.id !== cleanId && x.cleanerId === c.cleanerId && !x.endedAt && !x.pausedAt;
+    });
+    if (otherActive) {
+      return {
+        ok: false,
+        reason: '当前正在清扫 ' + DB.roomNo(otherActive.roomId) + ' 房，请先暂停该房再切换',
+        conflictCleanId: otherActive.id,
+        conflictRoomId: otherActive.roomId
+      };
+    }
     var now = Date.now(), pausedDelta = Math.max(0, now - c.pausedAt);
     if (c.pausedReason === '等待维修' && c.taskId) {
       var parent = DB.byId('tasks', c.taskId);
@@ -12747,7 +12760,7 @@ function homeStaff(me) {
       if (hkResume.length) {
         html += hkResume.map(function (c) {
           var r = DB.byId('rooms', c.roomId);
-          return '<div class="li" style="padding:11px 0" data-act="' + (x.task ? 'open-task' : 'go-hk') + '"' + (x.task ? ' data-id="' + x.task.id + '"' : '') + '>'
+          return '<div class="li" style="padding:11px 0" data-act="open-task" data-id="' + U.esc(c.taskId || '') + '">'
             + '<div class="grow"><div class="t-md t-w6">' + U.esc(r ? r.number : '') + ' 房 <span class="chip chip-green">维修已完成</span></div>'
             + '<div class="t-xs c3 mt8">工程已处理完成 · 点击返回继续清扫</div></div><div class="li-arrow">›</div></div>';
         }).join('');
@@ -13545,8 +13558,42 @@ App.page('task', {
 
 App.act('open-task', function (el, ds) { App.go('task/' + el.getAttribute('data-id')); });
 App.act('task-clean-resume', function (el) {
-  var res = RoomSvc.cleanResume(el.getAttribute('data-id'));
-  DB.flush(); U.toast(res && res.ok ? '已继续清扫' : ((res && res.reason) || '暂时无法继续')); App.refresh();
+  var cleanId = el.getAttribute('data-id');
+  var res = RoomSvc.cleanResume(cleanId);
+  if (res && res.ok) {
+    DB.flush(); U.toast('已继续清扫'); App.refresh(); return;
+  }
+  if (res && res.conflictCleanId) {
+    var target = DB.byId('roomClean', cleanId);
+    var other = DB.byId('roomClean', res.conflictCleanId);
+    App.sheet({
+      title: '切换清扫房间',
+      body: '<div class="pad" style="padding:8px 18px">'
+        + '<div class="t-md t-w6">当前正在清扫 ' + U.esc(DB.roomNo(other && other.roomId)) + ' 房</div>'
+        + '<div class="t-sm c2 mt12">如返回 ' + U.esc(DB.roomNo(target && target.roomId)) + ' 房继续清扫，系统会先暂停 '
+        + U.esc(DB.roomNo(other && other.roomId)) + ' 房并停止该房清扫计时。之后可再返回继续。</div></div>',
+      foot: '<button class="btn btn-ghost grow" data-act="close-sheet">暂不切换</button>'
+        + '<button class="btn btn-primary grow" data-act="task-clean-switch-submit" data-from="' + res.conflictCleanId + '" data-to="' + cleanId + '">暂停当前房并切换</button>'
+    });
+    return;
+  }
+  U.toast((res && res.reason) || '暂时无法继续');
+});
+App.act('task-clean-switch-submit', function (el) {
+  var fromId = el.getAttribute('data-from'), toId = el.getAttribute('data-to');
+  var paused = RoomSvc.cleanPause(fromId, 'switchRoom');
+  if (!paused || paused.ok === false) { U.toast((paused && paused.reason) || '当前房暂停失败'); return; }
+  var resumed = RoomSvc.cleanResume(toId);
+  if (!resumed || resumed.ok === false) {
+    /* 切换失败时恢复原房，避免员工被意外留在双暂停状态。 */
+    RoomSvc.cleanResume(fromId);
+    DB.flush();
+    U.toast((resumed && resumed.reason) || '切换失败');
+    App.closeSheet(); App.refresh(); return;
+  }
+  DB.flush(); App.closeSheet();
+  U.toast('已暂停原房并切换继续清扫');
+  App.refresh();
 });
 App.act('task-clean-pause-repair', function (el) {
   var res = RoomSvc.cleanPause(el.getAttribute('data-id'), 'waitRepair');
