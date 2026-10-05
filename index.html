@@ -3003,13 +3003,17 @@ window.Pool = (function () {
     if (t.claimBy) return { ok: false, reason: DB.userName(t.claimBy) + ' 正在处理', by: t.claimBy };
     var u = DB.byId('users', userId);
     if (t.poolCap && !Policy.can(u, t.poolCap)) return { ok: false, reason: '你没有接手该任务的业务权限' };
+    var roomHousekeeping = t.type === 'housekeeping' && !!t.roomId;
     DB.update('tasks', taskId, {
       claimBy: userId, claimAt: Date.now(), assigneeId: userId,
-      status: 'doing', lockVer: (t.lockVer || 0) + 1,
-      snapDoer: Engine.Snapshot.of(userId)
+      status: roomHousekeeping ? 'pending' : 'doing', lockVer: (t.lockVer || 0) + 1,
+      snapAssignee: roomHousekeeping ? Engine.Snapshot.of(userId) : (t.snapAssignee || null),
+      snapDoer: roomHousekeeping ? (t.snapDoer || null) : Engine.Snapshot.of(userId)
     });
-    Engine.Task.addStep(taskId, DB.userName(userId) + ' 接手处理');
-    Engine.log && Engine.log('接手池任务', t.code);
+    Engine.Task.addStep(taskId, roomHousekeeping
+      ? DB.userName(userId) + ' 已接单，待到房扫码开始清扫'
+      : DB.userName(userId) + ' 接手处理');
+    Engine.log && Engine.log(roomHousekeeping ? '接手客房任务待到房' : '接手池任务', t.code);
     return { ok: true, task: DB.byId('tasks', taskId) };
   }
 
@@ -3046,9 +3050,10 @@ window.Pool = (function () {
     if ((to.status || 'active') === 'leave') return { ok: false, reason: '接收人已停用，不能接收任务' };
     if (to.subjectType !== 'hotel' || (t.poolCap && !Policy.can(to, t.poolCap))) return { ok: false, reason: '接收人没有处理该任务的业务能力' };
     if (t.status !== 'pending' && t.status !== 'wait' && t.status !== 'doing') return { ok: false, reason: '任务当前状态不能移交' };
+    var keepPendingForRoom = t.type === 'housekeeping' && !!t.roomId && t.status !== 'doing';
     DB.update('tasks', taskId, {
       claimBy: toUserId, claimAt: Date.now(), assigneeId: toUserId,
-      status: 'doing', lockVer: (t.lockVer || 0) + 1,
+      status: keepPendingForRoom ? 'pending' : 'doing', lockVer: (t.lockVer || 0) + 1,
       snapAssignee: Engine.Snapshot.of(toUserId), snapTransfer: Engine.Snapshot.of(Engine.Session.me ? Engine.Session.me.id : ''),
       transferHistory: (t.transferHistory || []).concat([{ from: t.assigneeId || t.claimBy || '', to: toUserId,
         operator: me.id, reason: reason, at: Date.now() }])
@@ -3162,6 +3167,7 @@ window.RoomSvc = (function () {
     { key: 'vacant', name: '空房整理', icon: '✨', needInspect: false, piece: true },
     { key: 'deep', name: '深度清洁', icon: '🧼', needInspect: true, piece: true },
     { key: 'rework', name: '返工清扫', icon: '↩️', needInspect: true, piece: false },
+    { key: 'repair_reclean', name: '维修后重新清扫', icon: '🧽', needInspect: true, piece: false },
     { key: 'tidy', name: '简单整理', icon: '🧺', needInspect: false, piece: false }
   ];
   /* 特殊结果：不能误算为完成 */
@@ -3315,8 +3321,13 @@ window.RoomSvc = (function () {
        * 扫码开始时连带认领该房间的共享池任务，执行人不再是悬空状态。 */
       var tk = DB.byId('tasks', c.taskId);
       if (tk && tk.status !== 'done' && tk.status !== 'closed') {
+        var taskStartAt = Date.now();
         DB.update('tasks', c.taskId, {
-          status: 'doing', assigneeId: me.id, claimBy: me.id, claimAt: Date.now()
+          status: 'doing', assigneeId: me.id, claimBy: me.id,
+          claimAt: tk.claimAt || taskStartAt,
+          startedAt: tk.startedAt || taskStartAt,
+          roomScanAt: o.roomScanAt || tk.roomScanAt || 0,
+          snapDoer: Engine.Snapshot.of(me.id)
         });
         /* 住客/前厅发起的续住打扫与清扫任务同步，避免还显示“待处理”。 */
         var reqIds = (tk.guestRequestIds || []).slice();
@@ -3430,17 +3441,19 @@ window.RoomSvc = (function () {
         return x.roomId === roomId && x.endedAt && AuthContext.inScope(x);
       }).sort(function (a, b) { return b.endedAt - a.endedAt; })[0] || null;
       var recleanTask = Engine.Task.create({
-        type: 'housekeeping', businessCapability: 'housekeeping', source: '工程维修后清洁',
-        title: DB.roomNo(roomId) + ' 房「维修后清洁」', deptId: 'd_hk',
+        type: 'housekeeping', businessCapability: 'housekeeping', source: '工程维修联动自动生成',
+        title: DB.roomNo(roomId) + ' 房「维修后重新清扫」', deptId: 'd_hk',
         roomId: roomId, location: DB.roomNo(roomId) + ' 房',
-        desc: '工程维修已完成，现场需要客房再次清洁。维修结果：' + (result || '已修复'),
+        desc: '工程维修已完成，现场需要客房再次清扫。维修结果：' + (result || '已修复'),
         creatorId: Engine.Session.me.id, assigneeId: '', dueMin: 30,
-        priority: (r && (r.priority === 'urgent' || r.priority === 'high')) ? r.priority : 'high'
+        priority: (r && (r.priority === 'urgent' || r.priority === 'high')) ? r.priority : 'high',
+        cleanType: 'repair_reclean', cleanTypeName: '维修后重新清扫'
       });
       if (!recleanTask || recleanTask.ok === false) return recleanTask || { ok: false, reason: '维修后客房任务创建失败' };
       DB.update('tasks', recleanTask.id, {
         poolDeptId: 'd_hk', poolCap: 'clean', claimBy: '', claimAt: 0, lockVer: 1,
         clientKey: linkKey,
+        cleanType: 'repair_reclean', cleanTypeName: '维修后重新清扫', requiresRoomScan: 1,
         repairTaskId: taskId || '', repairWorkOrderId: workOrderId || '',
         parentCleanId: previousClean ? previousClean.id : '',
         eventChainId: (previousClean && previousClean.eventChainId) || ('room-repair-' + roomId + '-' + (workOrderId || taskId || recleanTask.id))
@@ -4064,6 +4077,45 @@ window.RoomSvc = (function () {
     Engine.log && Engine.log('批量发起客房作业', okList.length + ' 间，跳过 ' + skip.length + ' 间');
     return { ok: okList.length > 0, tasks: okList, skipped: skip, count: okList.length };
   }
+  /** 已接单房间任务：必须扫描本任务对应房间二维码后才真正开始清扫。
+   * 验收版的模拟扫码与正式小程序扫码都应走此服务，错误房号不得进入 doing。 */
+  function scanStartTask(taskId, scannedRoomId) {
+    var t = DB.byId('tasks', taskId);
+    if (!t || t.type !== 'housekeeping' || !t.roomId) return { ok: false, reason: '不是可扫码开始的客房任务' };
+    var sg = ServiceGuard.check({ record: t, capability: 'clean', action: 'task.write', write: true });
+    if (!sg.ok) return sg;
+    var me = Engine.Session.me;
+    if (!me || !Policy.can(me, 'clean')) return { ok: false, reason: '你没有客房清扫权限' };
+    if (t.assigneeId && t.assigneeId !== me.id) return { ok: false, reason: '该任务已由其他员工接单' };
+    if (!t.assigneeId) {
+      var claim = Engine.Task.accept(taskId);
+      if (!claim || claim.ok === false) return claim || { ok: false, reason: '接单失败' };
+      t = DB.byId('tasks', taskId);
+    }
+    if (scannedRoomId !== t.roomId) return { ok: false, reason: '二维码房间与任务房间不一致，不能开始清扫' };
+    if (t.status === 'done' || t.status === 'closed') return { ok: false, reason: '任务已完成' };
+    var existing = openClean(t.roomId);
+    if (existing) {
+      if (existing.taskId === taskId && existing.cleanerId === me.id) {
+        return { ok: true, repeat: true, clean: existing, task: t };
+      }
+      return { ok: false, reason: '该房间已有正在进行的清扫' };
+    }
+    /* 兼容修复前已被错误置为 doing、但从未真实扫码/开始的验收数据。
+     * 只有“无 startedAt 且无 roomClean”的历史脏状态允许迁移；真实进行中任务不放行。 */
+    var legacyClaimOnly = t.status === 'doing' && !t.startedAt && !t.roomScanAt && !existing;
+    if (t.status !== 'pending' && t.status !== 'wait' && !legacyClaimOnly) {
+      return { ok: false, reason: '任务当前状态不能扫码开始' };
+    }
+    if (legacyClaimOnly) DB.update('tasks', taskId, { status: 'pending' });
+    var scanAt = Date.now();
+    var typeKey = t.cleanType || (t.repairTaskId || /维修后/.test(t.source || '') ? 'repair_reclean' : 'checkout');
+    var res = cleanStart(t.roomId, { type: typeKey, taskId: taskId, roomScanAt: scanAt });
+    if (!res || res.ok === false) return res || { ok: false, reason: '开始清扫失败' };
+    DB.update('tasks', taskId, { roomScanAt: scanAt, startedAt: DB.byId('tasks', taskId).startedAt || scanAt });
+    return { ok: true, clean: res.clean, task: DB.byId('tasks', taskId) };
+  }
+
   /** 客房员工扫码：无任务但确需清扫 → 选类型开始临时清扫（自动建任务并立即开始） */
   function tempClean(roomId, typeKey, o) {
     o = o || {};
@@ -4202,6 +4254,7 @@ window.RoomSvc = (function () {
     setPriority: setPriority, releasePriority: releasePriority,
     swapRoom: swapRoom, reviewClaim: reviewClaim, reviewFinish: reviewFinish,
     currentWorkFloor: currentWorkFloor, availableWork: availableWork, notifyHousekeepingForRoom: notifyHousekeepingForRoom,
+    scanStartTask: scanStartTask,
     myTodayWork: myTodayWork, board: board,
     cleanStats: cleanStats, inspStats: inspStats, personToday: personToday,
     /* V4.2 §4 / §5 */
@@ -6606,6 +6659,27 @@ window.Engine = (function () {
       if (t.status === 'doing' && t.assigneeId === (Session.me && Session.me.id)) return { ok: true, repeat: true, task: t };
       if (t.status !== 'pending' && t.status !== 'wait') return { ok: false, reason: '任务当前状态不能接单' };
 
+      /* 房间型客房任务：接单只锁定责任人，不代表已经到房/开始清扫。
+       * 真正进入 doing 必须由 RoomSvc 扫码开始，以免“接单=开始”导致到房时间和清扫时长失真。 */
+      if (t.type === 'housekeeping' && t.roomId) {
+        var claimUserId = Session.me && Session.me.id;
+        if (!claimUserId) return { ok: false, reason: '未登录，不能接单' };
+        if (t.assigneeId === claimUserId && t.claimBy === claimUserId && t.claimAt) {
+          return { ok: true, repeat: true, claimed: true, task: t };
+        }
+        var claimNow = Date.now();
+        DB.update('tasks', id, {
+          status: 'pending', assigneeId: claimUserId, claimBy: claimUserId, claimAt: claimNow,
+          snapAssignee: Snapshot.of(claimUserId)
+        });
+        Task.addStep(id, DB.userName(claimUserId) + ' 已接单，待到房扫码开始清扫');
+        if (t.creatorId && t.creatorId !== claimUserId) {
+          notify(t.creatorId, { type: 'task', title: '客房任务已接单', content: t.title + ' 已由 ' + DB.userName(claimUserId) + ' 接单，待到房扫码开始', refType: 'task', refId: id });
+        }
+        log('接单待到房', t.code);
+        return { ok: true, claimed: true, task: DB.byId('tasks', id) };
+      }
+
       /* 工程工单是维修任务的唯一执行状态源。
        * 客房维修可能要求先扫房间码，因此必须先让工单层校验成功，
        * 不能先把父任务写成“处理中”再发现扫码条件不满足。 */
@@ -6829,6 +6903,18 @@ window.Engine = (function () {
    * ======================================================================= */
   var WorkOrder = {
     code: function () { return 'GD' + U.ymd().replace(/-/g, '') + '-' + U.pad2(DB.nextSeq('GD')); },
+    /** 工程时效统一口径：响应=接单-报修；到场=扫码/到场-报修；维修=完成-真正开始；总处理=完成-报修。 */
+    metrics: function (w) {
+      if (typeof w === 'string') w = DB.byId('workOrders', w);
+      if (!w) return { responseMin: null, arriveMin: null, repairMin: null, totalMin: null };
+      function mins(a, b) { return a && b ? Math.max(0, Math.round((a - b) / 60000)) : null; }
+      return {
+        responseMin: mins(w.respondAt, w.createdAt),
+        arriveMin: mins(w.arriveAt, w.createdAt),
+        repairMin: mins(w.finishAt, w.startAt),
+        totalMin: mins(w.finishAt, w.createdAt)
+      };
+    },
     get: function (id) {
       var w = DB.byId('workOrders', id);
       if (!w) return { ok: false, reason: '工单不存在' };
@@ -13207,29 +13293,60 @@ App.page('task', {
     if (!t) return Comp.empty('任务不存在');
     var S = Engine.Session, me = S.user();
     var wo = t.woId ? DB.byId('workOrders', t.woId) : null;
+    var isRoomCleanTask = t.type === 'housekeeping' && !!t.roomId;
+    var linkedClean = isRoomCleanTask
+      ? DB.findOne('roomClean', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
+    var isAssignee = t.assigneeId === me.id;
+    var canClaimPool = !t.assigneeId && (t.poolCap ? Policy.can(me, t.poolCap) : t.poolDeptId === me.deptId);
+    var claimedWaitingRoom = isRoomCleanTask && isAssignee && !linkedClean
+      && (t.status === 'pending' || (t.status === 'doing' && !t.startedAt));
     var overdue = Engine.Task.isOverdue(t);
     var left = t.dueAt ? U.leftText(t.dueAt) : null;
+    var taskChip = claimedWaitingRoom
+      ? '<span class="chip chip-blue">已接单 · 待到房</span>'
+      : Comp.taskStatusChip(t);
+    var displaySource = t.repairTaskId ? '工程维修联动自动生成' : (t.source || '');
 
     var html = '<div class="card"><div class="row-b">'
-      + '<div class="t-lg t-w6 grow">' + U.esc(t.title) + '</div>' + Comp.taskStatusChip(t) + '</div>'
-      + '<div class="t-xs c3 mt8">' + U.esc(t.code) + ' · ' + U.esc(t.source) + '</div>'
+      + '<div class="t-lg t-w6 grow">' + U.esc(t.title) + '</div>' + taskChip + '</div>'
+      + '<div class="t-xs c3 mt8">' + U.esc(t.code) + ' · ' + U.esc(displaySource) + '</div>'
       + (t.status !== 'done' && left ? '<div class="mt12 ' + left.cls + ' t-sm">' + left.text + '</div>' : '')
       + (t.result ? '<div class="mt12 t-sm" style="background:#f7f9fb;padding:10px 12px;border-radius:10px">处理结果：' + U.esc(t.result) + '</div>' : '')
       + '</div>';
+
+    /* 房间型客房任务：当前动作必须首屏可见。接单≠到房≠开始。 */
+    if (isRoomCleanTask && t.status !== 'done' && t.status !== 'closed') {
+      var roomActs = [];
+      if (linkedClean && linkedClean.cleanerId === me.id && linkedClean.pausedAt) {
+        roomActs.push('<button class="btn btn-primary grow" data-act="task-clean-resume" data-id="' + linkedClean.id + '">继续清扫</button>');
+      } else if (claimedWaitingRoom) {
+        roomActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-clean-scan" data-id="' + t.id + '">📷 扫描 ' + U.esc(DB.roomNo(t.roomId)) + ' 房二维码并开始清扫</button>');
+      } else if (t.status === 'pending' && !t.assigneeId && (canClaimPool || S.isManager() || S.isGM())) {
+        roomActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-accept" data-id="' + t.id + '">接单</button>');
+      } else if (linkedClean && linkedClean.cleanerId === me.id && t.status === 'doing') {
+        roomActs.push('<button class="btn btn-green grow" data-act="task-clean-finish" data-id="' + linkedClean.id + '">完成清扫</button>');
+        roomActs.push('<button class="btn btn-ghost grow" data-act="open-report-sheet" data-id="' + t.id + '">上报异常</button>');
+      }
+      if (roomActs.length) {
+        html += '<div class="card" style="border:1px solid var(--line-2)"><div class="card-head"><div class="card-title">当前操作</div></div>'
+          + '<div class="row" style="gap:10px;flex-wrap:wrap">' + roomActs.join('') + '</div></div>';
+      }
+    }
 
     /* 基本信息 */
     html += '<div class="card card-tight">'
       + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
+      + Comp.field('任务来源', U.esc(displaySource || '—'))
       + Comp.field('责任人', (wo && wo.assigneeId)
         ? U.esc(DB.userName(wo.assigneeId))
         : (t.assigneeId
           ? U.esc(DB.userName(t.assigneeId))
           : (t.poolDeptId ? '<span class="c-orange">待接单 · ' + U.esc(DB.deptName(t.poolDeptId)) + '共享</span>' : '未指定')))
-      + Comp.field('创建人', U.esc(DB.userName(t.creatorId)))
+      + Comp.field(t.repairTaskId ? '联动触发人' : '创建人', U.esc(DB.userName(t.creatorId)))
       + Comp.field('创建时间', U.mdhm(t.createdAt))
-      + Comp.field('要求完成', U.mdhm(t.dueAt))
+      + Comp.field(t.type === 'repair' ? '要求响应' : '要求完成', U.mdhm(t.dueAt))
       + ((t.issueTypeName || t.category) ? Comp.field('问题分类', U.esc(t.issueTypeName || t.category)) : '')
       + (t.cost ? Comp.field('相关成本', U.money(t.cost)) : '')
       + Comp.field('时效', overdue
@@ -13289,8 +13406,6 @@ App.page('task', {
     }
 
     /* 客房清扫任务与实际 roomClean 状态联动。员工从首页点任务时也能直接看到报修闭环并继续清扫。 */
-    var linkedClean = (t.type === 'housekeeping' && t.roomId)
-      ? DB.findOne('roomClean', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
     if (linkedClean && linkedClean.followTaskId) {
       var repairTask = DB.byId('tasks', linkedClean.followTaskId);
       var repairWo = repairTask && repairTask.woId ? DB.byId('workOrders', repairTask.woId) : null;
@@ -13300,18 +13415,24 @@ App.page('task', {
         + (repairWo && repairWo.result ? ' · ' + U.esc(repairWo.result) : '') + '</div></div>';
     }
 
+    if (t.repairTaskId) {
+      var sourceRepairTask = DB.byId('tasks', t.repairTaskId);
+      var sourceRepairWo = t.repairWorkOrderId ? DB.byId('workOrders', t.repairWorkOrderId)
+        : (sourceRepairTask && sourceRepairTask.woId ? DB.byId('workOrders', sourceRepairTask.woId) : null);
+      html += '<div class="card"><div class="card-title">关联维修来源</div>'
+        + '<div class="t-sm mt8">' + U.esc(sourceRepairTask ? sourceRepairTask.title : '房间工程维修') + '</div>'
+        + '<div class="t-xs c3 mt8">工程维修联动自动生成'
+        + (sourceRepairWo && sourceRepairWo.assigneeId ? ' · 维修完成：' + U.esc(DB.userName(sourceRepairWo.assigneeId)) : '')
+        + (sourceRepairWo && sourceRepairWo.result ? ' · ' + U.esc(sourceRepairWo.result) : '') + '</div></div>';
+    }
+
     /* 操作区 */
-    var isAssignee = t.assigneeId === me.id;
-    var canClaimPool = !t.assigneeId && t.poolDeptId === me.deptId && (!t.poolCap || Policy.can(me, t.poolCap));
     var isCreator = t.creatorId === me.id;
     var canManage = S.isManager() || S.isGM() || t.deptId === me.deptId && S.isManager();
     var acts = [];
-    if (linkedClean && linkedClean.cleanerId === me.id && linkedClean.pausedAt) {
-      acts.push('<button class="btn btn-primary grow" data-act="task-clean-resume" data-id="' + linkedClean.id + '">继续清扫</button>');
-    }
-    if (t.status !== 'done' && t.status !== 'closed') {
+    if (!isRoomCleanTask && t.status !== 'done' && t.status !== 'closed') {
       if (t.status === 'pending' && (isAssignee || canClaimPool || canManage)) acts.push('<button class="btn btn-primary grow" data-act="task-accept" data-id="' + t.id + '">接单</button>');
-      if ((t.status === 'doing' || t.status === 'pending') && isAssignee) acts.push('<button class="btn btn-green grow" data-act="task-finish" data-id="' + t.id + '">完成</button>');
+      if (t.status === 'doing' && isAssignee) acts.push('<button class="btn btn-green grow" data-act="task-finish" data-id="' + t.id + '">完成</button>');
       if (t.status === 'checking' && (isCreator || canManage)) {
         acts.push('<button class="btn btn-ghost grow" data-act="task-verify" data-id="' + t.id + '" data-pass="0">返工</button>');
         acts.push('<button class="btn btn-primary grow" data-act="task-verify" data-id="' + t.id + '" data-pass="1">验收通过</button>');
@@ -13352,7 +13473,62 @@ App.act('task-clean-resume', function (el) {
   DB.flush(); U.toast(res && res.ok ? '已继续清扫' : ((res && res.reason) || '暂时无法继续')); App.refresh();
 });
 App.act('task-accept', function (el) {
-  Engine.Task.accept(el.getAttribute('data-id')); DB.flush(); U.toast('已接单'); App.refresh();
+  var res = Engine.Task.accept(el.getAttribute('data-id'));
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '接单失败'); return; }
+  DB.flush();
+  U.toast(res.claimed ? '已接单，请到房扫码开始' : '已接单');
+  App.refresh();
+});
+
+App.act('task-clean-scan', function (el) {
+  var taskId = el.getAttribute('data-id');
+  var t = DB.byId('tasks', taskId);
+  if (!t || !t.roomId) return;
+  var roomNo = DB.roomNo(t.roomId);
+  if (window.AcceptanceTest) {
+    var badRoom = DB.findOne('rooms', function (r) { return r.id !== t.roomId; });
+    App.sheet({
+      title: '扫描房间二维码',
+      body: '<div class="pad" style="padding:8px 18px 4px">'
+        + '<div class="center" style="padding:18px 0 10px"><div style="font-size:46px">📷</div>'
+        + '<div class="t-lg t-w6 mt8">请扫描 ' + U.esc(roomNo) + ' 房二维码</div>'
+        + '<div class="t-sm c3 mt8">二维码用于确认已到正确房间；匹配后才正式记录清扫开始时间。</div></div>'
+        + '<button class="btn btn-primary btn-block btn-lg mt16" data-act="task-clean-scan-submit" data-id="' + taskId + '" data-room="' + t.roomId + '">模拟扫描 ' + U.esc(roomNo) + ' 房二维码</button>'
+        + (badRoom ? '<button class="btn btn-ghost btn-block mt12" data-act="task-clean-scan-submit" data-id="' + taskId + '" data-room="' + badRoom.id + '">测试错误房间二维码（' + U.esc(badRoom.number) + ' 房）</button>' : '')
+        + '</div>',
+      foot: '<button class="btn btn-ghost btn-block" data-act="close-sheet">取消</button>'
+    });
+    return;
+  }
+  U.toast('请使用小程序扫码功能扫描 ' + roomNo + ' 房二维码');
+});
+
+App.act('task-clean-scan-submit', function (el) {
+  var res = RoomSvc.scanStartTask(el.getAttribute('data-id'), el.getAttribute('data-room'));
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '二维码校验失败'); return; }
+  DB.flush(); App.closeSheet();
+  U.toast(DB.roomNo(res.clean.roomId) + ' 房核验通过，已开始清扫');
+  App.refresh();
+});
+
+App.act('task-clean-finish', function (el) {
+  var cleanId = el.getAttribute('data-id');
+  App.sheet({
+    title: '完成清扫',
+    body: '<div class="pad" style="padding:8px 18px">'
+      + '<div class="t-sm c2">确认现场清扫已完成。提交后按门店规则进入待查房或直接完成。</div>'
+      + '<textarea class="inp mt12" id="task-clean-note" placeholder="备注（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:64px"></textarea></div>',
+    foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      + '<button class="btn btn-green grow" data-act="task-clean-finish-submit" data-id="' + cleanId + '">确认完成清扫</button>'
+  });
+});
+App.act('task-clean-finish-submit', function (el) {
+  var note = (document.getElementById('task-clean-note') || {}).value || '';
+  var res = RoomSvc.cleanFinish(el.getAttribute('data-id'), { result: 'normal', note: note });
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '完成失败'); return; }
+  DB.flush(); App.closeSheet();
+  U.toast(res.needInspect ? '清扫完成，已进入待查房' : '清扫已完成');
+  App.refresh();
 });
 App.act('task-verify', function (el) {
   var pass = el.getAttribute('data-pass') === '1';
@@ -13660,6 +13836,34 @@ App.page('wo', {
     var task = w.taskId ? DB.byId('tasks', w.taskId) : null;
     var over = Engine.WorkOrder.isOverdue(w);
     var left = w.dueAt ? U.leftText(w.dueAt) : null;
+    var timing = Engine.WorkOrder.metrics(w);
+    var isFixer = w.assigneeId === me.id,
+      canClaim = !w.assigneeId && Policy.can(me, 'maintain'),
+      canVerify = Policy.can(me, 'accept_eng') || Policy.can(me, 'manage_org');
+    var acts = [];
+    if (w.status === 'wait' && (isFixer || canClaim)) {
+      if (w.roomId) {
+        acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="wo-scan-claim" data-id="' + w.id + '">📷 扫描 ' + U.esc(DB.roomNo(w.roomId)) + ' 房二维码并接单</button>');
+      } else {
+        acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="wo-act" data-id="' + w.id + '" data-a="accept">接单</button>');
+      }
+    }
+    if ((w.status === 'accepted' || w.status === 'waiting_part') && isFixer) {
+      acts.push('<button class="btn btn-primary btn-block btn-lg" data-act="wo-act" data-id="' + w.id + '" data-a="start">开始维修</button>');
+    }
+    if ((w.status === 'doing' || w.status === 'external_doing') && isFixer) {
+      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="wait_part">等待配件</button>');
+      if (w.status === 'doing') acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="external_contacted">联系外部维修</button>');
+      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="cant">无法处理</button>');
+      acts.push('<button class="btn btn-green grow" data-act="wo-finish" data-id="' + w.id + '">维修完成</button>');
+    }
+    if ((w.status === 'external_contacted' || w.status === 'cant') && isFixer) {
+      acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="external_doing">外部处理中</button>');
+    }
+    if (w.status === 'checking' && canVerify) {
+      acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="verify">验收通过</button>');
+      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="verify_fail">验收不通过</button>');
+    }
 
     var html = '<div class="card"><div class="row-b">'
       + '<div class="t-lg t-w6 grow">' + U.esc(w.title) + '</div>'
@@ -13668,13 +13872,21 @@ App.page('wo', {
       + (w.status !== 'done' && left ? '<div class="mt12 t-sm ' + left.cls + '">' + left.text + '</div>' : '')
       + '</div>';
 
-    /* 时效指标：全部由操作自动记录 */
-    html += '<div class="card"><div class="card-head"><div class="card-title">时效（系统自动计算）</div></div>'
-      + '<div class="kpi-grid c3">'
-      + kpiCell(w.respondAt ? Math.max(1, Math.round((w.respondAt - w.createdAt) / 60000)) + ' 分' : '—', '响应时间', w.respondAt && w.respondAt - w.createdAt > w.dueAt - w.createdAt ? 'c-red' : '')
-      + kpiCell(w.arriveAt ? Math.round((w.arriveAt - w.createdAt) / 60000) + ' 分' : '—', '到场时间')
-      + kpiCell(w.finishAt ? Math.round((w.finishAt - w.createdAt) / 60000) + ' 分' : '—', '维修时长')
-      + '</div></div>';
+    /* 当前唯一/主要动作优先放首屏，详细信息和历史放后面。 */
+    if (acts.length) {
+      html += '<div class="card" style="border:1px solid var(--line-2)"><div class="card-head"><div class="card-title">当前操作</div></div>'
+        + '<div class="row" style="gap:10px;flex-wrap:wrap">' + acts.join('') + '</div></div>';
+    }
+
+    /* 时效指标：全部由操作自动记录；维修时长从“真正开始维修”起算。 */
+    if (w.respondAt || w.arriveAt || w.startAt || w.finishAt) {
+      html += '<div class="card"><div class="card-head"><div class="card-title">时效（系统自动计算）</div></div>'
+        + '<div class="kpi-grid c3">'
+        + kpiCell(timing.responseMin === null ? '—' : timing.responseMin + ' 分', '响应用时', w.respondAt && w.respondAt > w.dueAt ? 'c-red' : '')
+        + kpiCell(timing.arriveMin === null ? '—' : timing.arriveMin + ' 分', '到场用时')
+        + kpiCell(timing.repairMin === null ? '—' : timing.repairMin + ' 分', '维修时长')
+        + '</div></div>';
+    }
 
     /* 基本信息 */
     html += '<div class="card card-tight">'
@@ -13684,7 +13896,7 @@ App.page('wo', {
       + Comp.field('报修人', U.esc(DB.userName(w.creatorId)))
       + Comp.field('责任人', w.assigneeId ? U.esc(DB.userName(w.assigneeId)) : '<span class="c-orange">待接单 · 工程部共享</span>')
       + Comp.field('创建时间', U.mdhm(w.createdAt))
-      + Comp.field('要求完成', U.mdhm(w.dueAt))
+      + Comp.field('要求响应', U.mdhm(w.dueAt))
       + (w.cost ? Comp.field('成本', U.money(w.cost)) : '')
       + '</div>';
 
@@ -13714,33 +13926,7 @@ App.page('wo', {
       }
     }
 
-    /* 操作 */
-    var isFixer = w.assigneeId === me.id,
-      canClaim = !w.assigneeId && Policy.can(me, 'maintain'),
-      canVerify = Policy.can(me, 'accept_eng') || Policy.can(me, 'manage_org');
-    var acts = [];
-    if (w.status === 'wait' && (isFixer || canClaim)) {
-      if (w.roomId) {
-        acts.push('<button class="btn btn-primary btn-block" data-act="wo-scan-claim" data-id="' + w.id + '">📷 扫描房间二维码并接单</button>');
-      } else {
-        acts.push('<button class="btn btn-primary btn-block" data-act="wo-act" data-id="' + w.id + '" data-a="accept">接单</button>');
-      }
-    }
-    if ((w.status === 'accepted' || w.status === 'waiting_part') && isFixer) acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="start">开始处理</button>');
-    if ((w.status === 'doing' || w.status === 'external_doing') && isFixer) {
-      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="wait_part">等待配件</button>');
-      if (w.status === 'doing') acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="external_contacted">联系外部维修</button>');
-      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="cant">无法处理</button>');
-      acts.push('<button class="btn btn-green grow" data-act="wo-finish" data-id="' + w.id + '">维修完成</button>');
-    }
-    if ((w.status === 'external_contacted' || w.status === 'cant') && isFixer) {
-      acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="external_doing">外部处理中</button>');
-    }
-    if (w.status === 'checking' && canVerify) {
-      acts.push('<button class="btn btn-primary grow" data-act="wo-act" data-id="' + w.id + '" data-a="verify">验收通过</button>');
-      acts.push('<button class="btn btn-ghost grow" data-act="wo-act" data-id="' + w.id + '" data-a="verify_fail">验收不通过</button>');
-    }
-    if (acts.length) html += '<div class="pad mt16"><div class="row" style="gap:10px;flex-wrap:wrap">' + acts.join('') + '</div></div>';
+    /* 当前操作已在首屏呈现。 */
 
     /* 处理过程 */
     html += '<div class="card"><div class="card-head"><div class="card-title">处理过程</div></div>' + Comp.timeline(w.process) + '</div>';
@@ -13783,7 +13969,7 @@ App.act('wo-act', function (el) {
 /* 客房维修扫码接单：主界面只保留一个动作。
  * 验收版在弹层里提供“正确二维码/错误二维码”两个测试入口；
  * 真实小程序接摄像头扫码后同样调用 wo-scan-claim-submit。
- * 正确扫码后直接接单进入处理中，不再要求第二次点击。 */
+ * 正确扫码后完成现场校验并接单；仍需点击“开始维修”才记录实际维修开始时间。 */
 App.act('wo-scan-claim', function (el) {
   var id = el.getAttribute('data-id');
   var w = DB.byId('workOrders', id);
