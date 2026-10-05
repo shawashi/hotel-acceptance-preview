@@ -13422,9 +13422,9 @@ App.page('task', {
       }
     }
 
-    /* 一线客房清扫任务默认只展示执行所需信息；完整资料按需展开。 */
-    var frontlineSimple = me && !S.isManager() && !S.isGM();
-    var compactRoomInfo = frontlineSimple;
+    /* 所有角色统一执行优先：详细资料默认折叠；权限决定能否查看，不决定是否占满首屏。 */
+    var compactTaskDetail = true;
+    var compactRoomInfo = compactTaskDetail;
     var detailFields = '<div class="card card-tight">'
       + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
@@ -13460,16 +13460,17 @@ App.page('task', {
     if (t.snapDoer) snaps.push(['处理时 · 处理人', t.snapDoer]);
     if (t.snapDone) snaps.push(['完成时 · 完成人', t.snapDone]);
     if (t.snapAcceptor) snaps.push(['验收时 · 验收人', t.snapAcceptor]);
-    if (snaps.length && !frontlineSimple) {
-      html += '<div class="card"><div class="card-head"><div class="card-title">历史责任快照</div></div>'
-        + '<div class="t-xs c3" style="line-height:1.8;margin-bottom:8px">记录当时姓名 / 部门 / 岗位 / 班次 / 角色；人员后续调岗、停用都不会改写此处。</div>'
+    if (snaps.length) {
+      html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
+        + '<span class="t-md t-w6">责任记录</span><span class="t-sm c3">需要时查看 ›</span></summary>'
+        + '<div class="t-xs c3 mt12" style="line-height:1.8">记录任务流转时的责任身份，仅用于管理追溯。</div>'
         + snaps.map(function (s) {
           var sp = s[1];
           return '<div class="row-b" style="padding:8px 0;border-bottom:1px solid var(--line)">'
             + '<div class="t-xs c3">' + U.esc(s[0]) + '</div>'
             + '<div class="t-sm t-w6" style="text-align:right">' + U.esc(Engine.Snapshot.text(sp))
             + (Engine.Snapshot.changed(sp) ? ' <span class="chip chip-orange">档案已变更</span>' : '') + '</div></div>';
-        }).join('') + '</div>';
+        }).join('') + '</details>';
     }
 
     if (t.photos && t.photos.length) {
@@ -13553,15 +13554,10 @@ App.page('task', {
     }
     if (acts.length) html += '<div class="pad mt16"><div class="row" style="gap:10px">' + acts.join('') + '</div></div>';
 
-    /* 处理过程属于追溯信息：一线员工默认折叠，管理角色保持展开。 */
-    if (frontlineSimple) {
-      html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
-        + '<span class="t-md t-w6">处理记录</span><span class="t-sm c3">需要时查看 ›</span></summary>'
-        + '<div class="mt12">' + Comp.timeline(t.steps) + '</div></details>';
-    } else {
-      html += '<div class="card"><div class="card-head"><div class="card-title">处理过程（系统自动记录）</div></div>'
-        + Comp.timeline(t.steps) + '</div>';
-    }
+    /* 处理过程统一作为追溯信息默认折叠，所有角色首屏保持执行优先。 */
+    html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
+      + '<span class="t-md t-w6">处理记录</span><span class="t-sm c3">需要时查看 ›</span></summary>'
+      + '<div class="mt12">' + Comp.timeline(t.steps) + '</div></details>';
 
     if (t.acceptResult) {
       html += '<div class="card"><div class="card-head"><div class="card-title">验收结果</div></div>'
