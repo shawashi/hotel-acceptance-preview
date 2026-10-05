@@ -13422,8 +13422,9 @@ App.page('task', {
       }
     }
 
-    /* 基本信息 */
-    html += '<div class="card card-tight">'
+    /* 一线客房清扫任务默认只展示执行所需信息；完整资料按需展开。 */
+    var compactRoomInfo = isRoomCleanTask && me && me.deptId === 'd_hk' && !S.isManager() && !S.isGM();
+    var detailFields = '<div class="card card-tight">'
       + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
@@ -13443,6 +13444,13 @@ App.page('task', {
         : '<span class="c-green">' + ((t.status === 'done' || t.status === 'closed') ? '按时完成' : '未超时') + '</span>')
       + (t.acceptResult ? Comp.field('验收结果', U.esc(t.acceptResult === 'pass' ? '通过' : '不通过') + ' · ' + U.esc(DB.userName(t.acceptorId))) : '')
       + '</div>';
+    if (compactRoomInfo) {
+      html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
+        + '<span class="t-md t-w6">任务信息</span><span class="t-sm c3">查看详情 ›</span></summary>'
+        + '<div class="mt12">' + detailFields.replace(/^<div class="card card-tight">|<\/div>$/g, '') + '</div></details>';
+    } else {
+      html += detailFields;
+    }
 
     /* 历史责任快照：人员调岗/离职后，历史仍按当时身份展示 */
     var snaps = [];
