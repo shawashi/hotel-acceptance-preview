@@ -20387,8 +20387,12 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   });
   /* seed 自带未读提醒只为演示正式首页；人工验收版默认不展示这些预置消息。 */
-  DB.find('notifications', function (n) { return /^n_\d+$/.test(n.id || ''); })
-    .forEach(function (n) { DB.remove('notifications', n.id); });
+  DB.find('notifications', function (n) {
+    if (/^n_\d+$/.test(n.id || '')) return true;
+    if (n.refType === 'task' && /^t_(his_|wo_|today_)/.test(n.refId || '')) return true;
+    if (n.refType === 'workorder' && /^wo_(today_|\d+$)/.test(n.refId || '')) return true;
+    return false;
+  }).forEach(function (n) { DB.remove('notifications', n.id); });
   /* 兼容本轮验收已经产生的旧数据：报修发生在修复代码部署前时，自动把同房间已完成工程单找回到未结束清扫。
    * 只在验收版执行，避免要求测试人员重做 803 整条链路。 */
   DB.find('roomClean', function (x) { return !x.endedAt && !x.repairResolvedAt; }).forEach(function (cl) {
