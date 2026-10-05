@@ -20419,7 +20419,18 @@ document.addEventListener('DOMContentLoaded', function () {
   var resetBtn = document.getElementById('acceptance-reset');
   var resetUser = '';
   try { resetUser = sessionStorage.getItem('hotel_acceptance_reset_user') || ''; sessionStorage.removeItem('hotel_acceptance_reset_user'); } catch (e) {}
-  if (resetUser && DB.byId('users', resetUser)) Engine.Session.set(resetUser);
+  if (resetUser && DB.byId('users', resetUser)) {
+    /* DB.reset() 会让正式 App 先按“未登录”状态渲染登录页。
+     * 验收层恢复测试身份后，必须同步恢复路由并重绘正式页面。 */
+    Engine.Session.set(resetUser);
+    Engine.boot();
+    DB.flush();
+    location.hash = '#/home';
+    if (window.App) {
+      App.go('home');
+      App.refresh();
+    }
+  }
   var me = Engine.Session.user();
   if (me && AcceptanceTest.accounts.some(function (a) { return a.id === me.id; })) select.value = me.id;
   else select.value = 'u_3';
