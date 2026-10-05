@@ -4465,7 +4465,7 @@ window.Breakfast = (function () {
     return { ok: true, day: DB.byId('breakfastDays', d.id) };
   }
 
-  /** 餐厅早餐收尾：录实际用餐人数 + 剩余食品现场照片。照片是当天收尾留痕，不能为空。 */
+  /** 餐厅早餐收尾：录实际用餐人数 + 可选剩余食品照片。照片支持上传/拍照两种来源。 */
   function actual(count, o) {
     o = o || {};
     var me = Engine.Session.me;
@@ -12444,6 +12444,20 @@ window.Comp = (function () {
     }).join('') + '</div>';
   }
 
+  /** 通用照片入口：所有业务统一提供“上传照片 / 拍照”两种来源。
+   * prefix 对应页面自己的动作前缀；验收版只模拟选择，真实小程序分别接相册/文件选择与相机能力。
+   */
+  function photoPicker(prefix, countId, count, note) {
+    count = Number(count) || 0;
+    return '<div class="mt12">'
+      + '<div class="row" style="gap:8px">'
+      + '<div class="btn btn-ghost grow" data-act="' + prefix + '-upload">📁 上传照片</div>'
+      + '<div class="btn btn-ghost grow" data-act="' + prefix + '-camera">📷 拍照</div>'
+      + '</div>'
+      + '<div class="t-xs c3 mt8">' + (note ? U.esc(note) + ' · ' : '') + '已选择 <span id="' + countId + '">' + count + '</span> 张</div>'
+      + '</div>';
+  }
+
   /* ---------- 任务 ---------- */
   function taskStatusChip(t) {
     if (t.status === 'done' || t.status === 'closed') return U.chip('task', t.status);
@@ -12545,7 +12559,7 @@ window.Comp = (function () {
   }
 
   return {
-    empty: empty, sectionTitle: sectionTitle, kpi: kpi, bar: bar, avatar: avatar, photos: photos,
+    empty: empty, sectionTitle: sectionTitle, kpi: kpi, bar: bar, avatar: avatar, photos: photos, photoPicker: photoPicker,
     taskStatusChip: taskStatusChip, todoRow: todoRow, taskRow: taskRow, timeline: timeline,
     incidentRow: incidentRow, purchaseRow: purchaseRow, field: field, seg: seg,
     typeIcon: typeIcon, typeBg: typeBg
@@ -13953,14 +13967,12 @@ App.act('task-finish', function (el) {
       + '<div class="opt" data-act="finish-pick" data-v="0"><span class="oe">⚠️</span>有异常</div>'
       + '</div>'
       + '<textarea class="inp mt16" id="fin-note" placeholder="补充说明（选填，可拍照代替文字）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px"></textarea>'
-      + '<div class="row mt12" style="gap:10px">'
-      + '<div class="photo add" style="width:64px;height:64px" data-act="finish-photo">＋</div>'
-      + '<div class="t-xs c3">已上传 <span id="ph-count">0</span> 张照片（演示：模拟上传）</div></div>'
+      + Comp.photoPicker('finish-photo', 'ph-count', 0, '现场照片可选')
       + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="finish-submit" data-id="' + id + '">确认完成</button>'
   });
-  window._finNormal = 1; window._finPhotos = 0;
+  window._finNormal = 1; window._finPhotos = [];
 });
 App.act('finish-pick', function (el) {
   var v = el.getAttribute('data-v');
@@ -13968,17 +13980,19 @@ App.act('finish-pick', function (el) {
   Array.prototype.forEach.call(el.parentNode.children, function (c) { c.classList.remove('on'); });
   el.classList.add('on');
 });
-App.act('finish-photo', function () {
-  window._finPhotos = (window._finPhotos || 0) + 1;
-  var c = document.getElementById('ph-count'); if (c) c.textContent = window._finPhotos;
-  U.toast('已拍照（演示）');
-});
+function finishAddPhoto(source) {
+  window._finPhotos = window._finPhotos || [];
+  window._finPhotos.push(source);
+  var c = document.getElementById('ph-count'); if (c) c.textContent = window._finPhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('finish-photo-upload', function () { finishAddPhoto('upload'); });
+App.act('finish-photo-camera', function () { finishAddPhoto('camera'); });
 App.act('finish-submit', function (el) {
   var id = el.getAttribute('data-id');
   var note = (document.getElementById('fin-note') || {}).value || '';
   var normal = window._finNormal !== 0;
-  var photos = [];
-  for (var i = 0; i < (window._finPhotos || 0); i++) photos.push('p_' + Date.now() + i);
+  var photos = (window._finPhotos || []).map(function (source, i) { return 'task_' + source + '_' + Date.now() + '_' + i; });
   Engine.Task.finish(id, (normal ? '处理完成，一切正常' : '处理时发现异常，需跟进') + (note ? '：' + note : ''), photos);
   if (!normal) {
     Engine.Incident.raise({ type: 'task_abnormal', level: 'mid', title: '任务异常需跟进：' + (DB.byId('tasks', id) || {}).title, detail: note || '处理过程中发现异常', refType: 'task', refId: id });
@@ -14047,7 +14061,7 @@ function woRow(w) {
  * 验收标准：客房员工发现 805 空调坏了，5—10 秒内完成上报
  * 交互：选地点（扫码/点选）→ 点问题类型 → 可选拍照/语音 → 提交
  * ======================================================================= */
-var _rp = { roomId: '', area: '', type: '', desc: '', photos: 0, voice: 0, equipId: '', cleanId: '', lockedRoom: false };
+var _rp = { roomId: '', area: '', type: '', desc: '', photos: [], voice: 0, equipId: '', cleanId: '', lockedRoom: false };
 var _rpRepairDecision = { cleanId: '', roomId: '' };
 
 App.page('report', {
@@ -14062,15 +14076,15 @@ App.page('report', {
           return c.taskId === t.id && !c.endedAt && c.cleanerId === (Engine.Session.me && Engine.Session.me.id);
         }) : null;
         _rp = {
-          roomId: t.roomId, area: t.location, type: '', desc: '', photos: 0, voice: 0,
+          roomId: t.roomId, area: t.location, type: '', desc: '', photos: [], voice: 0,
           equipId: t.equipId || '', cleanId: activeTaskClean ? activeTaskClean.id : '',
           lockedRoom: !!activeTaskClean
         };
       }
     } else if (r.params.clean && r.params.room) {
-      _rp = { roomId: r.params.room, area: '', type: '', desc: '', photos: 0, voice: 0, equipId: '', cleanId: r.params.clean, lockedRoom: true };
+      _rp = { roomId: r.params.room, area: '', type: '', desc: '', photos: [], voice: 0, equipId: '', cleanId: r.params.clean, lockedRoom: true };
     } else if (!r.params.keep) {
-      _rp = { roomId: '', area: '', type: '', desc: '', photos: 0, voice: 0, equipId: '', cleanId: '', lockedRoom: false };
+      _rp = { roomId: '', area: '', type: '', desc: '', photos: [], voice: 0, equipId: '', cleanId: '', lockedRoom: false };
     }
 
     var me = Engine.Session.user();
@@ -14096,8 +14110,8 @@ App.page('report', {
     /* 3. 补充 */
     html += '<div class="sec-title">③ 补充说明（可以不填）</div>'
       + '<div class="card">'
-      + '<div class="row" style="gap:10px">'
-      + '<div class="btn btn-ghost grow" data-act="rp-photo">📷 拍照<span id="rp-ph-n">' + (_rp.photos ? _rp.photos + ' 张' : '') + '</span></div>'
+      + Comp.photoPicker('rp-photo', 'rp-ph-n', (_rp.photos || []).length, '现场照片可选')
+      + '<div class="row mt8" style="gap:10px">'
       + '<div class="btn btn-ghost grow" data-act="rp-voice">🎤 语音<span id="rp-vc-n">' + (_rp.voice ? _rp.voice + ' 秒' : '') + '</span></div>'
       + '</div>'
       + '<textarea class="inp mt12" id="rp-desc" placeholder="一句话说明，例如：空调不制冷，房间很热" '
@@ -14201,11 +14215,14 @@ App.act('pick-type', function (el) {
   if (w) w.innerHTML = assignTip(Engine.issueType(_rp.type));
 });
 
-App.act('rp-photo', function () {
-  _rp.photos = (_rp.photos || 0) + 1;
-  var n = document.getElementById('rp-ph-n'); if (n) n.textContent = _rp.photos + ' 张';
-  U.toast('已拍照（演示）');
-});
+function rpAddPhoto(source) {
+  _rp.photos = _rp.photos || [];
+  _rp.photos.push(source);
+  var n = document.getElementById('rp-ph-n'); if (n) n.textContent = _rp.photos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('rp-photo-upload', function () { rpAddPhoto('upload'); });
+App.act('rp-photo-camera', function () { rpAddPhoto('camera'); });
 App.act('rp-voice', function () {
   _rp.voice = 6;
   var n = document.getElementById('rp-vc-n'); if (n) n.textContent = _rp.voice + ' 秒';
@@ -14215,8 +14232,7 @@ App.act('rp-voice', function () {
 App.act('rp-submit', function () {
   if (!_rp.type) { U.toast('请选择问题类型'); return; }
   _rp.desc = (document.getElementById('rp-desc') || {}).value || '';
-  var photos = [];
-  for (var i = 0; i < (_rp.photos || 0); i++) photos.push('p_' + Date.now() + i);
+  var photos = (_rp.photos || []).map(function (source, i) { return 'report_' + source + '_' + Date.now() + '_' + i; });
   var res = Engine.Report.submit({
     roomId: _rp.roomId, issueType: _rp.type, desc: _rp.desc || '',
     photos: photos, voiceSec: _rp.voice, equipId: _rp.equipId
@@ -14476,13 +14492,12 @@ App.act('wo-finish', function (el) {
           + '<button data-act="mat-plus" data-id="' + it.id + '" data-p="' + it.price + '">＋</button></div></div>';
       }).join('') + '</div>'
       + '<div class="row-b mt16"><div class="t-md t-w6">合计耗材成本</div><div class="t-lg t-w6 c-orange" id="mat-total">' + U.money(0) + '</div></div>'
-      + '<div class="mt12"><div class="photo add" style="width:64px;height:64px;display:inline-flex" data-act="wo-photo">＋</div>'
-      + '<span class="t-xs c3" style="margin-left:10px">完成后需拍照留痕</span></div>'
+      + Comp.photoPicker('wo-photo', 'wo-photo-n', (window._woPhotos || []).length, '完成后需留照片')
       + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="wo-finish-submit" data-id="' + id + '">提交完成</button>'
   });
-  window._mats = {}; window._woPhotos = 0; window._woResult = '已修复，测试正常'; window._woNeedReclean = false;
+  window._mats = {}; window._woPhotos = []; window._woResult = '已修复，测试正常'; window._woNeedReclean = false;
 });
 App.act('wo-reclean', function (el) {
   window._woNeedReclean = el.getAttribute('data-v') === '1';
@@ -14515,10 +14530,14 @@ App.act('mat-minus', function (el) {
   var n = document.querySelector('[data-n="' + id + '"]'); if (n) n.textContent = window._mats[id];
   updateMatTotal();
 });
-App.act('wo-photo', function () {
-  window._woPhotos = (window._woPhotos || 0) + 1;
-  U.toast('已拍照（演示）');
-});
+function woAddPhoto(source) {
+  window._woPhotos = window._woPhotos || [];
+  window._woPhotos.push(source);
+  var n = document.getElementById('wo-photo-n'); if (n) n.textContent = window._woPhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('wo-photo-upload', function () { woAddPhoto('upload'); });
+App.act('wo-photo-camera', function () { woAddPhoto('camera'); });
 App.act('wo-finish-submit', function (el) {
   var id = el.getAttribute('data-id');
   var mats = [];
@@ -14527,7 +14546,7 @@ App.act('wo-finish-submit', function (el) {
     var it = DB.byId('inventory', k);
     if (it) mats.push({ name: it.name, qty: window._mats[k], unit: it.unit, price: it.price });
   });
-  var photos = []; for (var i = 0; i < (window._woPhotos || 0); i++) photos.push('p_' + Date.now() + i);
+  var photos = (window._woPhotos || []).map(function (source, i) { return 'workorder_' + source + '_' + Date.now() + '_' + i; });
   var w = DB.byId('workOrders', id);
   if (w) {
     w.materials = mats;
@@ -14694,19 +14713,20 @@ App.page('meal-manage', {
   }
 });
 
-var _mealActualPhotos = 0;
+var _mealActualPhotos = [];
 App.act('meal-actual', function (el) {
   var w = el.getAttribute('data-w');
   var d = Engine.Meal.day();
   var expect = w === 'lunchActual' ? d.lunchExpect : d.dinnerExpect;
-  _mealActualPhotos = 0;
+  _mealActualPhotos = [];
   App.sheet({
     title: (w === 'lunchActual' ? '午餐' : '晚餐') + '收尾',
     body: '<div class="pad" style="padding:8px 14px">'
       + '<div class="row-b"><div><div class="t-md t-w6">实际就餐人数</div><div class="t-xs c3 mt8">默认带出预计人数，按现场调整即可</div></div>'
       + '<div class="num-step"><button data-act="mv-minus">−</button><div class="n" id="mv-n" style="font-size:20px">' + expect + '</div><button data-act="mv-plus">＋</button></div></div>'
-      + '<div class="row-b mt12"><div><div class="t-sm t-w6">剩余饭菜</div><div class="t-xs c3 mt8">有明显剩余时拍照，方便后续看浪费程度；没有可不拍。</div></div>'
-      + '<div class="btn btn-ghost btn-sm" data-act="meal-leftover-photo">📷 拍照 <span id="meal-photo-n"></span></div></div>'
+      + '<div class="mt12"><div class="t-sm t-w6">剩余饭菜</div><div class="t-xs c3 mt8">有明显剩余时留存，方便后续看浪费程度；没有可不留。</div>'
+      + Comp.photoPicker('meal-leftover-photo', 'meal-photo-n', _mealActualPhotos.length, '支持相册/文件上传或现场拍照')
+      + '</div>'
       + '<textarea class="inp mt12" id="meal-leftover-note" placeholder="剩余情况说明（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:50px"></textarea>'
       + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
@@ -14715,25 +14735,28 @@ App.act('meal-actual', function (el) {
 });
 App.act('mv-plus', function () { var n = document.getElementById('mv-n'); n.textContent = Math.min(999, (+n.textContent || 0) + 1); });
 App.act('mv-minus', function () { var n = document.getElementById('mv-n'); n.textContent = Math.max(0, (+n.textContent || 0) - 1); });
-App.act('meal-leftover-photo', function () {
-  _mealActualPhotos++;
+function mealAddPhoto(source) {
+  _mealActualPhotos.push(source);
   var n = document.getElementById('meal-photo-n');
-  if (n) n.textContent = _mealActualPhotos + ' 张';
-  U.toast('已拍照（验收版模拟）');
-});
+  if (n) n.textContent = _mealActualPhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('meal-leftover-photo-upload', function () { mealAddPhoto('upload'); });
+App.act('meal-leftover-photo-camera', function () { mealAddPhoto('camera'); });
 App.act('meal-actual-save', function (el) {
   var n = document.getElementById('mv-n');
   var v = n ? +n.textContent : NaN;
   if (isNaN(v) || v < 0) { U.toast('请输入实际人数'); return; }
-  var photos = [];
-  for (var i = 0; i < _mealActualPhotos; i++) photos.push('meal_leftover_' + Date.now() + '_' + i);
+  var photos = _mealActualPhotos.map(function (source, i) {
+    return 'meal_leftover_' + source + '_' + Date.now() + '_' + i;
+  });
   var res = Engine.Meal.setActual(el.getAttribute('data-w'), v, {
     photos: photos,
     note: ((document.getElementById('meal-leftover-note') || {}).value || '').trim()
   });
   if (!res || res.ok === false) { U.toast((res && res.reason) || '记录失败'); return; }
   DB.flush(); App.closeSheet();
-  U.toast(_mealActualPhotos ? '已记录实际人数并留存剩余饭菜照片' : '已记录员工餐实际人数');
+  U.toast(_mealActualPhotos.length ? '已记录实际人数并留存剩余饭菜照片' : '已记录员工餐实际人数');
   App.refresh();
 });
 
@@ -15140,12 +15163,22 @@ App.act('pr-receive-no', function (el) {
         return '<span class="chip chip-line" data-act="pr-exc-item" data-n="' + U.esc(it.name) + '" style="margin:0 6px 6px 0;cursor:pointer">' + U.esc(it.name) + '</span>';
       }).join('') + '</div>'
       + '<textarea class="inp mt12" id="pr-exc-note" placeholder="说明（如：叶菜不新鲜、规格不符）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:66px"></textarea>'
+      + Comp.photoPicker('pr-exc-photo', 'pr-exc-photo-n', 0, '异常现场照片可选')
       + '<div class="t-xs c3 mt12">提交后单据进入「验收异常」，不会直接完成。</div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="pr-receive-no-go" data-id="' + id + '">提交异常</button>'
   });
-  window.__prExc = { result: Engine.Purchase.EXC[0].key, items: [] };
+  window.__prExc = { result: Engine.Purchase.EXC[0].key, items: [], photos: [] };
 });
+function prExcAddPhoto(source) {
+  window.__prExc = window.__prExc || { result: 'handle', items: [], photos: [] };
+  window.__prExc.photos = window.__prExc.photos || [];
+  window.__prExc.photos.push(source);
+  var n = document.getElementById('pr-exc-photo-n'); if (n) n.textContent = window.__prExc.photos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('pr-exc-photo-upload', function () { prExcAddPhoto('upload'); });
+App.act('pr-exc-photo-camera', function () { prExcAddPhoto('camera'); });
 App.act('pr-exc-pick', function (el) {
   window.__prExc = window.__prExc || { items: [] };
   window.__prExc.result = el.getAttribute('data-k');
@@ -15166,7 +15199,8 @@ App.act('pr-exc-item', function (el) {
 App.act('pr-receive-no-go', function (el) {
   var f = window.__prExc || { result: 'handle', items: [] };
   var res = Engine.Purchase.receive(el.getAttribute('data-id'), false, {
-    result: f.result, items: f.items, reason: (document.getElementById('pr-exc-note') || {}).value || ''
+    result: f.result, items: f.items, reason: (document.getElementById('pr-exc-note') || {}).value || '',
+    photos: (f.photos || []).map(function (source, i) { return 'purchase_' + source + '_' + Date.now() + '_' + i; })
   });
   DB.flush(); App.closeSheet(); window.__prExc = null;
   if (res && res.error) { U.toast(res.error); return; }
@@ -19843,40 +19877,44 @@ App.act('bf-forecast-save', function () {
   U.toast(res && res.ok !== false ? '已保存预计人数' : ((res && res.reason) || '保存失败'));
   App.refresh();
 });
-var _bfActualPhotos = 0;
+var _bfActualPhotos = [];
 App.act('bf-actual', function () {
-  _bfActualPhotos = 0;
+  _bfActualPhotos = [];
   App.sheet({
     title: '早餐收尾统计',
     body: '<div class="pad" style="padding:8px 18px">'
       + '<div class="row-b"><div class="t-md">实际就餐人数</div>'
       + '<div class="num-step"><button data-act="bf-minus">−</button><div class="n" id="bf-n" style="font-size:20px">0</div><button data-act="bf-plus">＋</button></div></div>'
-      + '<div class="card mt12" style="margin-left:0;margin-right:0"><div class="row-b"><div><div class="t-md t-w6">剩余食品照片</div>'
-      + '<div class="t-xs c3 mt8">早餐结束后拍摄剩余食品现场，作为当天留存。</div></div>'
-      + '<div class="btn btn-ghost btn-sm" data-act="bf-leftover-photo">📷 拍照 <span id="bf-photo-n"></span></div></div></div>'
+      + '<div class="card mt12" style="margin-left:0;margin-right:0"><div class="t-md t-w6">剩余食品照片</div>'
+      + '<div class="t-xs c3 mt8">有明显剩余时留存，方便后续看浪费程度；没有可不留。</div>'
+      + Comp.photoPicker('bf-leftover-photo', 'bf-photo-n', _bfActualPhotos.length, '支持相册/文件上传或现场拍照')
+      + '</div>'
       + '<textarea class="inp mt12" id="bf-actual-note" placeholder="补充说明（选填），如：剩余少量粥和面点" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>'
       + '<div class="t-xs c3 mt12">实际人数必须记录；如有明显剩余可拍照留存，方便后续判断浪费程度。</div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-green grow" data-act="bf-actual-save">上报收尾</button>'
   });
 });
-App.act('bf-leftover-photo', function () {
-  _bfActualPhotos++;
+function bfAddPhoto(source) {
+  _bfActualPhotos.push(source);
   var n = document.getElementById('bf-photo-n');
-  if (n) n.textContent = _bfActualPhotos + ' 张';
-  U.toast('已拍照（验收版模拟）');
-});
+  if (n) n.textContent = _bfActualPhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('bf-leftover-photo-upload', function () { bfAddPhoto('upload'); });
+App.act('bf-leftover-photo-camera', function () { bfAddPhoto('camera'); });
 App.act('bf-actual-save', function () {
   var n = +((document.getElementById('bf-n') || {}).textContent || 0);
-  var photos = [];
-  for (var i = 0; i < _bfActualPhotos; i++) photos.push('breakfast_leftover_' + Date.now() + '_' + i);
+  var photos = _bfActualPhotos.map(function (source, i) {
+    return 'breakfast_leftover_' + source + '_' + Date.now() + '_' + i;
+  });
   var res = Breakfast.actual(n, {
     photos: photos,
     note: ((document.getElementById('bf-actual-note') || {}).value || '').trim()
   });
   if (!res || res.ok === false) { U.toast((res && res.reason) || '保存失败'); return; }
   DB.flush(); App.closeSheet();
-  U.toast(_bfActualPhotos ? '已记录早餐人数并留存剩余食品照片' : '已记录早餐实际人数');
+  U.toast(_bfActualPhotos.length ? '已记录早餐人数并留存剩余食品照片' : '已记录早餐实际人数');
   App.refresh();
 });
 App.act('bf-history', function () { App.go('bf-history'); });
@@ -20547,17 +20585,29 @@ App.act('mt-open', function (el) {
       + '<div class="t-xs c3 mt8" style="padding:0 16px">完成保养时选择结果；选择「发现异常」会自动生成关联维修工单。</div>'
       + '<div class="pad mt8" style="padding:0 16px">'
       + '<textarea class="inp" id="mt-remark" placeholder="备注（选填，异常时在结果里说清是什么问题）" '
-      + 'style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:70px"></textarea></div>'
+      + 'style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:70px"></textarea>'
+      + Comp.photoPicker('mt-photo', 'mt-photo-n', 0, '保养现场照片可选')
+      + '</div>'
       + '<div class="list mt12">' + Maintenance.RESULTS.map(function (rs) {
         return '<div class="li" data-act="mt-finish" data-id="' + rec.id + '" data-r="' + rs.key + '">'
           + '<div class="grow"><div class="t-md">' + U.esc(rs.name) + '</div></div><div class="li-arrow">›</div></div>';
       }).join('') + '</div>'
   });
+  window.__mtPhotos = [];
 });
+function mtAddPhoto(source) {
+  window.__mtPhotos = window.__mtPhotos || [];
+  window.__mtPhotos.push(source);
+  var n = document.getElementById('mt-photo-n'); if (n) n.textContent = window.__mtPhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('mt-photo-upload', function () { mtAddPhoto('upload'); });
+App.act('mt-photo-camera', function () { mtAddPhoto('camera'); });
 App.act('mt-finish', function (el) {
   var rm = document.getElementById('mt-remark');
+  var photos = (window.__mtPhotos || []).map(function (source, i) { return 'maintenance_' + source + '_' + Date.now() + '_' + i; });
   var res = Maintenance.finish(el.getAttribute('data-id'), el.getAttribute('data-r'),
-    { remark: rm ? rm.value.trim() : '' });
+    { remark: rm ? rm.value.trim() : '', photos: photos });
   U.toast(res.ok
     ? (res.workOrder ? '保养已留痕，并自动生成维修工单 ' + res.workOrder.code : '保养记录已保存')
     : res.reason);
@@ -20576,6 +20626,7 @@ App.act('mt-rec', function (el) {
       + '<div class="t-xs c3 mt8">扫码 ' + U.mdhm(rec.scanAt) + '　开始 ' + U.mdhm(rec.startAt) + '　完成 ' + U.mdhm(rec.endAt) + '</div>'
       + '<div class="t-xs c3 mt8">执行人：' + U.esc(rec.workerName || '—') + '</div>'
       + (rec.remark ? '<div class="t-xs c2 mt8">备注：' + U.esc(rec.remark) + '</div>' : '')
+      + (rec.photos && rec.photos.length ? '<div class="t-xs c2 mt8">现场照片：' + rec.photos.length + ' 张</div>' + Comp.photos(rec.photos) : '')
       + (parts.length ? '<div class="t-xs c2 mt8">使用配件：' + parts.map(function (p) { return U.esc(p.name) + '×' + p.qty; }).join('、') + '</div>' : '')
       + (rec.repairWorkOrderId ? '<div class="t-xs c-red mt8">已关联维修工单</div>' : '')
       + '<div class="t-xs c3 mt8">下次计划：' + (rec.nextDueAt ? U.md(rec.nextDueAt) : '一次性计划') + '</div>'
