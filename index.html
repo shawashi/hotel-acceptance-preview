@@ -3351,9 +3351,15 @@ window.RoomSvc = (function () {
     if (!c || c.endedAt) return { ok: false, reason: '没有进行中的清扫' };
     var eg = ExecutionGuard.actor(c, 'cleanerId', { action: 'room.write', scope: 'room', capability: 'clean' }); if (!eg.ok) return eg;
     var rk = CLEAN_SPECIAL.filter(function (x) { return x.key === reasonKey; })[0];
+    if (reasonKey === 'waitRepair' && !c.repairPending) {
+      return { ok: false, reason: '当前房间没有进行中的工程报修，请先完成报修再选择等待维修' };
+    }
     DB.update('roomClean', cleanId, { pausedAt: Date.now(), pausedReason: rk ? rk.name : (reasonKey || '暂停') });
     DB.update('rooms', c.roomId, { hkStatus: 'paused' });
     tl(c.roomId, 'clean', '清扫暂停：' + (rk ? rk.name : '临时中断'), { refType: 'roomClean', refId: cleanId });
+    if (reasonKey === 'waitRepair' && c.taskId) {
+      Engine.Task.addStep(c.taskId, '客房员工选择暂停本房等待工程；等待工程期间不计客房清扫超时，可处理其他房间');
+    }
     return { ok: true };
   }
   function cleanResume(cleanId) {
@@ -3371,6 +3377,11 @@ window.RoomSvc = (function () {
     DB.update('roomClean', cleanId, { pausedMs: (c.pausedMs || 0) + pausedDelta, pausedAt: 0, pausedReason: '' });
     DB.update('rooms', c.roomId, { hkStatus: 'cleaning' });
     tl(c.roomId, 'clean', '继续清扫', { refType: 'roomClean', refId: cleanId });
+    if (c.taskId) {
+      Engine.Task.addStep(c.taskId, c.pausedReason === '维修已完成，待继续清扫'
+        ? '工程已完成，客房员工返回房间继续清扫'
+        : '客房员工结束暂停，继续清扫');
+    }
     return { ok: true };
   }
 
@@ -12704,6 +12715,7 @@ function trendBars(arr) {
 function homeStaff(me) {
   var myTasks = Engine.Task.homeQueue(me.id);
   var myWork = Engine.MyWork ? Engine.MyWork.list(me.id) : [];
+  var hkAvailableTaskIds = {};
   var hour = new Date().getHours();
   var greet = hour < 6 ? '夜班辛苦了' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
   var unread = DB.find('notifications', function (n) {
@@ -12720,6 +12732,7 @@ function homeStaff(me) {
   /* ---- 客房员工首页：直接看到可作业客房，不必先进入任务中心 ---- */
   if (Policy.businessEnabled('housekeeping', me.hotelId) && Policy.can(me, 'clean') && typeof RoomSvc !== 'undefined' && RoomSvc.availableWork) {
     var hkAvailable = RoomSvc.availableWork(me.id);
+    hkAvailable.forEach(function (x) { if (x.task && x.task.id) hkAvailableTaskIds[x.task.id] = 1; });
     var hkResume = DB.find('roomClean', function (c) {
       return c.cleanerId === me.id && !c.endedAt && !!c.pausedAt && c.pausedReason === '维修已完成，待继续清扫';
     });
@@ -12734,7 +12747,7 @@ function homeStaff(me) {
       if (hkResume.length) {
         html += hkResume.map(function (c) {
           var r = DB.byId('rooms', c.roomId);
-          return '<div class="li" style="padding:11px 0" data-act="go-hk">'
+          return '<div class="li" style="padding:11px 0" data-act="' + (x.task ? 'open-task' : 'go-hk') + '"' + (x.task ? ' data-id="' + x.task.id + '"' : '') + '>'
             + '<div class="grow"><div class="t-md t-w6">' + U.esc(r ? r.number : '') + ' 房 <span class="chip chip-green">维修已完成</span></div>'
             + '<div class="t-xs c3 mt8">工程已处理完成 · 点击返回继续清扫</div></div><div class="li-arrow">›</div></div>';
         }).join('');
@@ -12751,6 +12764,10 @@ function homeStaff(me) {
     }
     html += '<div class="t-xs c3 mt12">' + (hkFloor !== '' ? '当前主要作业楼层：' + U.esc(String(hkFloor)) + 'F；同级任务优先本楼层。' : '可按当日现场协调安排自行选择楼层，扫码后系统自动识别当前作业楼层。') + '</div></div>';
   }
+
+  /* 同一张待清扫任务已经在“可作业客房”展示时，不在“我的工作”重复出现；
+   * 扫码真正开始后 availableWork 会自动移除，此时任务再进入“我的工作”的进行中视图。 */
+  myWork = myWork.filter(function (w) { return !(w.refType === 'task' && hkAvailableTaskIds[w.refId]); });
 
   /* ---- V1.1 统一“我的工作” ---- */
   html += '<div class="card"><div class="card-head"><div class="card-title">我的工作'
@@ -13369,14 +13386,22 @@ App.page('task', {
     if (isRoomCleanTask && t.status !== 'done' && t.status !== 'closed') {
       var roomActs = [];
       if (linkedClean && linkedClean.cleanerId === me.id && linkedClean.pausedAt) {
-        roomActs.push('<button class="btn btn-primary grow" data-act="task-clean-resume" data-id="' + linkedClean.id + '">继续清扫</button>');
+        var resumeText = linkedClean.pausedReason === '维修已完成，待继续清扫'
+          ? '✅ 维修已完成 · 继续清扫'
+          : (linkedClean.repairPending ? '继续本房清扫' : '继续清扫');
+        roomActs.push('<button class="btn btn-primary grow" data-act="task-clean-resume" data-id="' + linkedClean.id + '">' + resumeText + '</button>');
       } else if (claimedWaitingRoom) {
         roomActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-clean-scan" data-id="' + t.id + '">📷 扫描 ' + U.esc(DB.roomNo(t.roomId)) + ' 房二维码并开始清扫</button>');
       } else if (t.status === 'pending' && !t.assigneeId && (canClaimPool || S.isManager() || S.isGM())) {
         roomActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-accept" data-id="' + t.id + '">接单</button>');
       } else if (linkedClean && linkedClean.cleanerId === me.id && t.status === 'doing') {
+        if (linkedClean.repairPending) {
+          roomActs.push('<button class="btn btn-ghost grow" data-act="task-clean-pause-repair" data-id="' + linkedClean.id + '">暂停本房，去做其他房</button>');
+        }
         roomActs.push('<button class="btn btn-green grow" data-act="task-clean-finish" data-id="' + linkedClean.id + '">完成清扫</button>');
-        roomActs.push('<button class="btn btn-ghost grow" data-act="open-report-sheet" data-id="' + t.id + '">上报异常</button>');
+        if (!linkedClean.repairPending) {
+          roomActs.push('<button class="btn btn-ghost grow" data-act="open-report-sheet" data-id="' + t.id + '">🛠 工程报修</button>');
+        }
       }
       if (roomActs.length) {
         html += '<div class="card" style="border:1px solid var(--line-2)"><div class="card-head"><div class="card-title">当前操作</div></div>'
@@ -13522,6 +13547,12 @@ App.act('open-task', function (el, ds) { App.go('task/' + el.getAttribute('data-
 App.act('task-clean-resume', function (el) {
   var res = RoomSvc.cleanResume(el.getAttribute('data-id'));
   DB.flush(); U.toast(res && res.ok ? '已继续清扫' : ((res && res.reason) || '暂时无法继续')); App.refresh();
+});
+App.act('task-clean-pause-repair', function (el) {
+  var res = RoomSvc.cleanPause(el.getAttribute('data-id'), 'waitRepair');
+  DB.flush();
+  U.toast(res && res.ok ? '本房已暂停等待维修；现在可以去扫码清扫其他房间' : ((res && res.reason) || '暂离失败'));
+  App.refresh();
 });
 App.act('task-accept', function (el) {
   var res = Engine.Task.accept(el.getAttribute('data-id'));
@@ -13703,7 +13734,16 @@ App.page('report', {
     // 每次进入重置（除非带上下文）
     if (r.params.task) {
       var t = DB.byId('tasks', r.params.task);
-      if (t) { _rp = { roomId: t.roomId, area: t.location, type: '', desc: t.title, photos: 0, voice: 0, equipId: t.equipId || '', cleanId: '', lockedRoom: false }; }
+      if (t) {
+        var activeTaskClean = t.type === 'housekeeping' ? DB.findOne('roomClean', function (c) {
+          return c.taskId === t.id && !c.endedAt && c.cleanerId === (Engine.Session.me && Engine.Session.me.id);
+        }) : null;
+        _rp = {
+          roomId: t.roomId, area: t.location, type: '', desc: '', photos: 0, voice: 0,
+          equipId: t.equipId || '', cleanId: activeTaskClean ? activeTaskClean.id : '',
+          lockedRoom: !!activeTaskClean
+        };
+      }
     } else if (r.params.clean && r.params.room) {
       _rp = { roomId: r.params.room, area: '', type: '', desc: '', photos: 0, voice: 0, equipId: '', cleanId: r.params.clean, lockedRoom: true };
     } else if (!r.params.keep) {
