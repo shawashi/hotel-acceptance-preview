@@ -14181,7 +14181,7 @@ App.page('task', {
     var isCreator = t.creatorId === me.id;
     var canManage = S.isManager() || S.isGM() || t.deptId === me.deptId && S.isManager();
     var acts = [];
-    if (!isRoomCleanTask && t.status !== 'done' && t.status !== 'closed') {
+    if (!isRoomCleanTask && !isRoomInspectionTask && t.status !== 'done' && t.status !== 'closed') {
       if (t.status === 'pending' && (isAssignee || canClaimPool || canManage)) acts.push('<button class="btn btn-primary grow" data-act="task-accept" data-id="' + t.id + '">接单</button>');
       if (t.status === 'doing' && isAssignee) acts.push('<button class="btn btn-green grow" data-act="task-finish" data-id="' + t.id + '">完成</button>');
       if (t.status === 'checking' && (isCreator || canManage)) {
