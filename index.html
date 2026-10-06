@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 21:00 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 21:20 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -4604,7 +4604,7 @@ window.Breakfast = (function () {
     if (!cnt && cnt !== 0) return Policy.fail('请填写预计用餐人数');
 
     var isFirst = !d.firstAt;
-    var patch = { updatedAt: now, finalForecast: cnt };
+    var patch = { updatedAt: now, finalForecast: cnt, ackAt: 0, ackBy: '', ackByName: '' };
     if (isFirst) { patch.firstForecast = cnt; patch.firstBy = me.id; patch.firstAt = now; }
     patch.status = d.actual ? 'done' : 'waitActual';
     if (o.adults !== undefined) patch.detail = Object.assign({}, d.detail, {
@@ -4627,6 +4627,22 @@ window.Breakfast = (function () {
       });
     });
     Engine.log && Engine.log(isFirst ? '报早餐预计人数' : '调整早餐预计人数', cnt + ' 人');
+    return { ok: true, day: DB.byId('breakfastDays', d.id) };
+  }
+
+  /** 餐厅确认已知悉当前早餐预计；前厅再次修订后 forecast() 会自动使确认失效。 */
+  function acknowledge(date) {
+    var me = Engine.Session.me;
+    var d0 = Policy.deny(null, me, '', function (u) {
+      return (canActual(u) || Policy.can(u, 'catering')) ? null : Policy.fail('确认早餐预计需要餐厅权限');
+    });
+    if (d0) return d0;
+    var d = day(date || U.ymd(Date.now() + 86400000), false);
+    if (!d || !d.firstAt) return Policy.fail('当前没有需要确认的早餐预计');
+    DB.update('breakfastDays', d.id, {
+      ackAt: Date.now(), ackBy: me.id, ackByName: me.name, updatedAt: Date.now()
+    });
+    Engine.log && Engine.log('确认早餐预计', d.date + ' · ' + d.finalForecast + ' 人');
     return { ok: true, day: DB.byId('breakfastDays', d.id) };
   }
 
@@ -4742,7 +4758,7 @@ window.Breakfast = (function () {
   }
 
   return {
-    day: day, forecast: forecast, actual: actual, history: history, today: today,
+    day: day, forecast: forecast, acknowledge: acknowledge, actual: actual, history: history, today: today,
     stats: stats, diffOf: diffOf, pmsRefHint: pmsRefHint,
     canForecast: function (u) { return canForecast(u || Engine.Session.me); },
     canActual: function (u) { return canActual(u || Engine.Session.me); }
@@ -4757,14 +4773,16 @@ window.Breakfast = (function () {
  *   员工餐   → mealReports       （员工自己报备吃不吃）
  *   团餐     → teamMeals         （投资人/店长/销售安排，餐厅执行）
  * 团餐默认由投资人/店主或店长安排；是否开放给销售负责人走权限，不写死（§7.2）
- * 状态：已收到 → 准备中 → 已备餐/执行中 → 实际人数 → 完成
+ * 状态：待餐厅确认 → 已确认 → 餐后录实际人数 → 完成（厨房线下执行过程不进系统）
  * ======================================================================= */
 window.TeamMeal = (function () {
 
   var ST = {
-    received: { name: '已收到', cls: 'blue' },
-    preparing: { name: '准备中', cls: 'orange' },
-    ready: { name: '已备餐/执行中', cls: 'purple' },
+    received: { name: '待餐厅确认', cls: 'orange' },
+    confirmed: { name: '餐厅已确认', cls: 'blue' },
+    /* 兼容旧验收数据：旧“准备中/已备餐”统一视作已经确认，不再继续暴露过程状态。 */
+    preparing: { name: '餐厅已确认', cls: 'blue' },
+    ready: { name: '餐厅已确认', cls: 'blue' },
     done: { name: '已完成', cls: 'green' },
     canceled: { name: '已取消', cls: 'gray' }
   };
@@ -4888,8 +4906,10 @@ window.TeamMeal = (function () {
 
   /** 合法状态流转（V4.2.1 §19：不能跳过中间状态） */
   var TRANS = {
-    received: ['preparing', 'canceled'],
-    preparing: ['ready', 'canceled'],
+    received: ['confirmed', 'canceled'],
+    confirmed: ['done', 'canceled'],
+    /* 旧数据兼容：允许旧过程状态直接收尾，不再要求继续逐步推进。 */
+    preparing: ['done', 'canceled'],
     ready: ['done', 'canceled'],
     done: [],
     canceled: []
@@ -4910,7 +4930,17 @@ window.TeamMeal = (function () {
       return Policy.fail('不允许从「' + stName(m.status) + '」直接到「' + stName(to) + '」');
     }
     var patch = { status: to, updatedAt: Date.now() };
-    if (to === 'done' && o.actualCount != null) patch.actualCount = Number(o.actualCount) || 0;
+    if (to === 'confirmed') {
+      patch.confirmedAt = Date.now();
+      patch.confirmedBy = me ? me.id : '';
+      patch.confirmedByName = me ? me.name : '';
+    }
+    if (to === 'done' && o.actualCount != null) {
+      patch.actualCount = Number(o.actualCount) || 0;
+      patch.completedAt = Date.now();
+      patch.completedBy = me ? me.id : '';
+      patch.completedByName = me ? me.name : '';
+    }
     if (o.peopleCount != null) patch.peopleCount = Number(o.peopleCount) || 0;
     if (o.note) patch.remark = o.note;
     m.flow = m.flow || [];
@@ -6715,6 +6745,14 @@ window.Engine = (function () {
     if (n.refType === 'room') {
       var r = DB.byId('rooms', n.refId);
       return !!r && (r.inspStatus === 'pending' || r.inspStatus === 'recheck' || !!r.blockStatus);
+    }
+    if (n.refType === 'teamMeals') {
+      var tm = DB.byId('teamMeals', n.refId);
+      return !!tm && tm.status === 'received';
+    }
+    if (n.refType === 'breakfast') {
+      var bf = DB.byId('breakfastDays', n.refId);
+      return !!bf && !!bf.firstAt && !bf.ackAt && !bf.actualAt;
     }
     return !n.read;
   }
@@ -20346,8 +20384,13 @@ App.page('catering', {
     var tomorrowBreakfast = Breakfast.day(tomorrowDate, false);
     html += '<div class="card" style="border-left:3px solid var(--blue)">'
       + '<div class="row-b"><div><div class="card-title">明日早餐预计</div>'
-      + '<div class="t-xs c3 mt8">供厨师今天提前备料；不把厨房具体制作步骤做成逐项打勾。</div></div>'
-      + '<div class="t-xl t-w6">' + (tomorrowBreakfast && tomorrowBreakfast.firstAt ? tomorrowBreakfast.finalForecast + ' 人' : '待前厅确认') + '</div></div></div>';
+      + '<div class="t-xs c3 mt8">' + (tomorrowBreakfast && tomorrowBreakfast.firstAt
+        ? (tomorrowBreakfast.ackAt ? ('餐厅已确认 · ' + U.esc(tomorrowBreakfast.ackByName || DB.userName(tomorrowBreakfast.ackBy))) : '待餐厅确认')
+        : '待前厅确认') + '</div></div>'
+      + '<div class="t-xl t-w6">' + (tomorrowBreakfast && tomorrowBreakfast.firstAt ? tomorrowBreakfast.finalForecast + ' 人' : '—') + '</div></div>'
+      + ((tomorrowBreakfast && tomorrowBreakfast.firstAt && !tomorrowBreakfast.ackAt && (Breakfast.canActual(u) || Policy.can(u, 'catering')))
+        ? '<div class="btn btn-primary btn-block mt12" data-act="bf-ack" data-date="' + tomorrowDate + '">确认已知悉</div>' : '')
+      + '</div>';
 
     if (breakfastOn && Breakfast.canForecast(u)) {
       html += '<div class="card"><div class="card-head"><div class="card-title">录入/修订预计人数</div>'
@@ -20362,9 +20405,21 @@ App.page('catering', {
         + '<div class="btn btn-green btn-block mt12" data-act="bf-actual">录入实际人数</div></div>';
     }
 
-    /* 前厅进入餐饮页的唯一任务是早餐预计：完成这部分后就结束，不把团餐、员工餐、
-     * 食材采购和经营统计塞给前厅。 */
-    if (isFrontOnly) return html;
+    /* 前厅除早餐预计外，可回看本人发起的团餐状态；不暴露厨房执行过程与餐厅经营功能。 */
+    if (isFrontOnly) {
+      var mineTeamMeals = TeamMeal.list({ from: U.ymd(Date.now() - 7 * 86400000) }).filter(function (m) {
+        return m.arrangerId === u.id;
+      }).sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); }).slice(0, 20);
+      html += '<div class="card"><div class="card-head"><div class="card-title">我发起的团餐</div></div>'
+        + (mineTeamMeals.length ? '<div class="list" style="margin:0">' + mineTeamMeals.map(function (m) {
+          var confirmTxt = m.status === 'received' ? '待餐厅确认' : (m.confirmedAt ? ('餐厅已确认 · ' + U.esc(m.confirmedByName || DB.userName(m.confirmedBy))) : TeamMeal.stName(m.status));
+          return '<div class="li"><div class="grow"><div class="t-md t-w6">' + U.esc(m.team || m.event || m.code) + '</div>'
+            + '<div class="t-xs c3 mt8">' + U.esc(m.date) + ' ' + U.esc(m.slot || '') + (m.time ? ' ' + U.esc(m.time) : '') + ' · 预计 ' + (m.peopleCount || 0) + ' 人</div>'
+            + '<div class="t-xs c3 mt8">' + confirmTxt + (m.status === 'done' ? (' · 实际 ' + (m.actualCount || 0) + ' 人') : '') + '</div></div></div>';
+        }).join('') + '</div>' : Comp.empty('暂时没有已发起团餐', '🍱'))
+        + '</div>';
+      return html;
+    }
 
     /* ---------- 团餐 ---------- */
     var tbToday = TeamMeal.board();
@@ -20381,9 +20436,8 @@ App.page('catering', {
         + (m.source === 'meeting' ? '<div class="t-xs c3 mt8">由会议预订自动生成（已关联，无需重复录入）</div>' : '')
         + '<div class="row mt12" style="gap:8px">'
         + '<span class="chip chip-' + TeamMeal.stCls(m.status) + '">' + TeamMeal.stName(m.status) + '</span>'
-        + (m.status === 'received' ? '<div class="btn btn-ghost btn-sm" data-act="tm-adv" data-id="' + m.id + '" data-k="preparing">开始准备</div>' : '')
-        + (m.status === 'preparing' ? '<div class="btn btn-ghost btn-sm" data-act="tm-adv" data-id="' + m.id + '" data-k="ready">已备餐</div>' : '')
-        + (m.status === 'ready' ? '<div class="btn btn-green btn-sm" data-act="tm-done" data-id="' + m.id + '">录实际人数完成</div>' : '')
+        + (m.status === 'received' ? '<div class="btn btn-primary btn-sm" data-act="tm-adv" data-id="' + m.id + '" data-k="confirmed">确认收到</div>' : '')
+        + (['confirmed','preparing','ready'].indexOf(m.status) >= 0 ? '<div class="btn btn-green btn-sm" data-act="tm-done" data-id="' + m.id + '">录实际人数并完成</div>' : '')
         + '</div></div></div>';
     }).join('') + '</div>' : Comp.empty('暂无待执行团餐', '🍱');
     html += '</div>';
@@ -20437,6 +20491,14 @@ App.page('catering', {
 });
 
 /* ---------------- 早餐：预计 / 实际 ---------------- */
+App.act('bf-ack', function (el) {
+  var res = Breakfast.acknowledge(el.getAttribute('data-date') || U.ymd(Date.now() + 86400000));
+  DB.flush();
+  U.toast(res && res.ok !== false ? '已确认早餐预计人数' : ((res && res.reason) || '确认失败'));
+  App.refresh();
+});
+
+
 App.act('bf-forecast', function () {
   var d = Breakfast.day();
   App.sheet({
