@@ -7998,8 +7998,13 @@ window.Engine = (function () {
       if (!Policy.rule('routineFoodSkipGMApproval')) return true;
       var threshold = Number(Policy.rule('foodPurchaseApprovalAmount')) || 0;
       if (threshold > 0 && Number(pr.amount || 0) > threshold) return true;
-      var sup = DB.byId('suppliers', pr.supplierId);
-      if (Policy.rule('foodPurchaseNewSupplierNeedsGM') && sup && Number(sup.deliveries || 0) <= 0) return true;
+      if (Policy.rule('foodPurchaseNewSupplierNeedsGM') && pr.supplierId) {
+        var priorDone = DB.find('purchases', function (x) {
+          return x.id !== pr.id && x.kind === 'food' && x.supplierId === pr.supplierId
+            && x.status === 'done' && AuthContext.inScope(x);
+        });
+        if (!priorDone.length) return true;
+      }
       if (Policy.rule('foodPurchasePriceAlertNeedsGM')) {
         var rate = Number(Policy.rule('priceAlertRate')) || 0.15;
         if ((pr.items || []).some(function (it) {
