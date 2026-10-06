@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 16:45 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -585,6 +585,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 </div>
 
 <!-- 核心层：工具 / 数据库 / 种子数据 / 权限策略 / 业务引擎 -->
+<script>window.__ACCEPTANCE_SINGLE_FILE__=true;</script>
 <script>
 /* ==========================================================================
  * core/util.js —— 通用工具层
@@ -3784,7 +3785,7 @@ window.RoomSvc = (function () {
       var inspectTask = DB.byId('tasks', ins.taskId);
       if (inspectTask && inspectTask.status !== 'done' && inspectTask.status !== 'closed') {
         DB.update('tasks', ins.taskId, {
-          status: result === 'pass' ? 'done' : 'doing',
+          status: result === 'pass' ? 'done' : 'waitcheck',
           completedAt: result === 'pass' ? now : 0,
           result: result === 'pass' ? '查房合格' : ('查房发现 ' + issues.length + ' 项问题，等待整改/复查'),
           assigneeId: me.id,
@@ -3836,19 +3837,24 @@ window.RoomSvc = (function () {
     if (hasEngIssue) {
       /* 设备类查房异常必须进入“工程维修”正式闭环，而不是只生成一个通用整改任务。
        * 工程端以 repair task + workOrder 为唯一执行入口，因此这里同时创建两者并进入 maintain 共享池。 */
-      var maintainer = Policy.whoHas('maintain').filter(function (u) { return AuthContext.inScope(u); })[0];
-      var engDeptId = maintainer ? maintainer.deptId : 'd_eng';
+      /* 维修事项进入标准工程归属 + maintain 能力共享池。
+       * 不再拿“第一个有 maintain 能力的人”的主部门当任务部门：
+       * 部门是组织属性，跨岗位能力不能改变维修事项的业务归属。 */
+      var engDeptId = 'd_eng';
       var engDesc = issues.filter(function (i) { return i.cat === '设备'; })
         .map(function (i) { return i.cat + '：' + (i.note || ''); }).join('；');
-      var tEng = Engine.Task.create({
+      /* 必须通过统一共享池发布，不能手工拼一个“看起来像共享池”的任务。
+       * Pool.publish 同时负责 capability 可见性、池时间戳和通知，避免任务已创建但工程端收不到。 */
+      var engPool = (window.Pool && Pool.publish) ? Pool.publish({
         type: 'repair', businessCapability: 'maintenance', source: '查房发现设备异常',
-        title: r.number + ' 房查房发现设备异常', deptId: engDeptId,
+        title: r.number + ' 房查房发现设备异常', deptId: engDeptId, cap: 'maintain',
         roomId: ins.roomId, location: r.number + ' 房', desc: engDesc,
-        creatorId: me.id, assigneeId: '', dueMin: 60, priority: 'high'
-      });
+        creatorId: me.id, dueMin: 60, priority: 'high',
+        clientKey: 'inspection-repair-' + inspId
+      }) : { ok: false, reason: '工程共享池不可用' };
+      var tEng = engPool && engPool.ok ? engPool.task : null;
       if (tEng && tEng.id) {
         DB.update('tasks', tEng.id, {
-          poolDeptId: engDeptId, poolCap: 'maintain', claimBy: '', claimAt: 0, lockVer: 1,
           category: '设备', issueTypeName: '查房设备异常', businessCapability: 'maintenance'
         });
         var engWo = Engine.WorkOrder.create({
@@ -10568,8 +10574,14 @@ window.Engine = (function () {
        * 同一状态组内再按业务优先级和产生时间排序；异常仍突出，但普通待接不得压住进行中工作。 */
       var rank = { doing: 0, paused: 1, alert: 2, confirm: 3, temporary: 4, waiting: 5 };
       return out.sort(function (a, b) {
-        var ar = Object.prototype.hasOwnProperty.call(rank, a.statusGroup) ? rank[a.statusGroup] : 9;
-        var br = Object.prototype.hasOwnProperty.call(rank, b.statusGroup) ? rank[b.statusGroup] : 9;
+        /* 新进入共享池的待接工作必须露出首屏，不能被演示/历史超时事项挤到第7条以后。
+         * 这不是改变业务优先级，而是保证“新单已送达”在接收人首页可见。 */
+        var at = a.refType === 'task' ? DB.byId('tasks', a.refId) : null;
+        var bt = b.refType === 'task' ? DB.byId('tasks', b.refId) : null;
+        var ap = at && !at.assigneeId && (at.poolCap || at.poolDeptId) ? -1 : null;
+        var bp = bt && !bt.assigneeId && (bt.poolCap || bt.poolDeptId) ? -1 : null;
+        var ar = ap !== null ? ap : (Object.prototype.hasOwnProperty.call(rank, a.statusGroup) ? rank[a.statusGroup] : 9);
+        var br = bp !== null ? bp : (Object.prototype.hasOwnProperty.call(rank, b.statusGroup) ? rank[b.statusGroup] : 9);
         if (ar !== br) return ar - br;
         var prio = ((b.priority === 'urgent' ? 3 : b.priority === 'high' ? 2 : 1) - (a.priority === 'urgent' ? 3 : a.priority === 'high' ? 2 : 1));
         if (prio) return prio;
@@ -12671,7 +12683,16 @@ window.App = (function () {
   };
 })();
 
-document.addEventListener('DOMContentLoaded', App.start);
+/* 正式应用只启动一次。验收单文件会在所有页面模块注入完毕后显式调用 App.start，
+ * 避免手机预览器在脚本解析到 app.js 时过早启动（此时 home/login 页面尚未注册）。 */
+if (!window.__ACCEPTANCE_SINGLE_FILE__) {
+  /* 常规网页保持 DOMContentLoaded 启动；测试桩/特殊宿主若不提供 readyState，
+   * 不在脚本加载阶段抢跑，由宿主显式调用 App.start。 */
+  if (typeof document.readyState === 'string') {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', App.start);
+    else App.start();
+  }
+}
 </script>
 <!-- 页面层：复用组件 + 各业务页面 -->
 <script>window.AcceptanceTest={};</script>
@@ -13254,11 +13275,16 @@ function inspectionMineCard(me) {
     + list.slice(0, 5).map(function (t) {
       var room = DB.byId('rooms', t.roomId);
       var waiting = t.status === 'pending' && !t.startedAt;
+      var rectifying = t.status === 'waitcheck';
       return '<div class="li" data-act="mywork-open" data-route="task/' + U.esc(t.id) + '">'
         + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : DB.roomNo(t.roomId)) + ' 房 · '
         + (t.inspectionKind === 'recheck' ? '复查' : '查房') + ' '
-        + (waiting ? '<span class="chip chip-orange">已接单·待扫码</span>' : '<span class="chip chip-blue">进行中</span>') + '</div>'
-        + '<div class="t-xs c3 mt8">' + (waiting ? '到房扫描对应房间二维码后开始' : '查房进行中，可从这里返回继续') + '</div></div><div class="li-arrow">›</div></div>';
+        + (waiting ? '<span class="chip chip-orange">已接单·待扫码</span>'
+          : rectifying ? '<span class="chip chip-orange">等待整改/复查</span>'
+          : '<span class="chip chip-blue">进行中</span>') + '</div>'
+        + '<div class="t-xs c3 mt8">' + (waiting ? '到房扫描对应房间二维码后开始'
+          : rectifying ? '本轮查房已结束 · 等待问题处理完成后复查'
+          : '查房进行中，可从这里返回继续') + '</div></div><div class="li-arrow">›</div></div>';
     }).join('') + '</div>';
 }
 
@@ -14058,8 +14084,27 @@ App.page('task', {
       }
     }
 
+    /* 查房发现异常后，原查房任务转“等待整改/复查”，不再伪装成仍在查房进行中。
+     * 详情首屏明确告诉检查人下一步由谁处理，并展示关联工程维修状态。 */
+    if (isRoomInspectionTask && t.status === 'waitcheck') {
+      var finishedInspection = DB.find('roomInsp', function (x) { return x.taskId === t.id; })
+        .sort(function (a, b) { return (b.endedAt || 0) - (a.endedAt || 0); })[0];
+      var pendingIssues = finishedInspection ? DB.find('roomIssues', function (x) {
+        return x.inspId === finishedInspection.id && x.status !== 'closed';
+      }) : [];
+      var repairIssue = pendingIssues.filter(function (x) { return x.cat === '设备' && x.taskId; })[0];
+      var repairTask = repairIssue ? DB.byId('tasks', repairIssue.taskId) : null;
+      var repairWo = repairTask && repairTask.woId ? DB.byId('workOrders', repairTask.woId) : null;
+      html += '<div class="card" style="border:1px solid var(--line-2)">'
+        + '<div class="card-title">等待整改 / 复查</div>'
+        + '<div class="t-sm mt8">本轮查房已结束，不需要继续查房。问题处理完成后，系统会生成待复查任务。</div>'
+        + (repairTask ? '<div class="notice mt12">🛠 工程维修：' + U.esc(repairTask.title)
+          + ' · ' + U.esc(repairWo ? (repairWo.assigneeId ? DB.userName(repairWo.assigneeId) + '处理中' : '待工程接单') : '待工程处理') + '</div>' : '')
+        + '</div>';
+    }
+
     /* 房间查房任务：接单只锁定责任人，扫码后才进入真正查房中。 */
-    if (isRoomInspectionTask && t.status !== 'done' && t.status !== 'closed') {
+    if (isRoomInspectionTask && t.status !== 'done' && t.status !== 'closed' && t.status !== 'waitcheck') {
       var inspActs = [];
       if (claimedWaitingInspection) {
         inspActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-insp-scan" data-id="' + t.id + '">📷 扫描 ' + U.esc(DB.roomNo(t.roomId)) + ' 房二维码并开始查房</button>');
@@ -14436,8 +14481,15 @@ App.page('mywo', {
   render: function () {
     var me = Engine.Session.user();
     var list = DB.find('workOrders', function (w) {
-      if (w.deptId === me.deptId && Policy.can(me, 'maintain')) return true;
+      if (!AuthContext.inScope(w)) return false;
       if (w.assigneeId === me.id) return true;
+      /* 未接维修工单属于 maintain 能力共享池：有维修能力的人都应可见，
+       * 不能再用主部门把跨岗位/临时能力人员挡在池外。 */
+      if (!w.assigneeId && Policy.can(me, 'maintain')) {
+        var poolTask = w.taskId ? DB.byId('tasks', w.taskId) : null;
+        if (!poolTask || !poolTask.poolCap || poolTask.poolCap === 'maintain') return true;
+      }
+      if (w.deptId === me.deptId && Policy.can(me, 'maintain')) return true;
       return me.roles.indexOf('manager') >= 0 && w.deptId === me.deptId;
     }).sort(function (a, b) { return b.createdAt - a.createdAt; });
     var html = '<div class="card" style="margin-top:12px"><div class="kpi-grid c3">'
@@ -21704,6 +21756,10 @@ App.act('cost-drill', function (el) {
 });
 </script>
 <script>
+/* 单文件所有模块均已注册，先启动正式 App，再启动验收控制层。 */
+App.start();
+</script>
+<script>
 /* 仅由 build-acceptance.js 注入验收单文件；正式 index.html 不加载本文件。 */
 window.AcceptanceTest = {
   accounts: [
@@ -21726,7 +21782,7 @@ window.AcceptanceTest = {
   ]
 };
 
-document.addEventListener('DOMContentLoaded', function () {
+function acceptanceBoot() {
   /* 验收版基线：seed 自带演示待办不能混入人工验收。
    * 只归档明确的 seed ID；人工验收现场产生的真实链路不受影响。 */
   DB.find('tasks', function (t) {
@@ -21884,7 +21940,13 @@ document.addEventListener('DOMContentLoaded', function () {
     App.refresh();
     U.toast('已切换为 ' + DB.userName(select.value) + '，业务数据保持不变');
   });
-});
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', acceptanceBoot);
+} else {
+  acceptanceBoot();
+}
 
 
 </script>
