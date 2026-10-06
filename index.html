@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:21 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:31 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -21875,6 +21875,34 @@ function acceptanceBoot() {
       status: 'closed', completedAt: now,
       result: '已合并到原查房人的复查任务'
     });
+  });
+
+  /* 兼容更早版本已生成的“共享待复查”：
+   * 如果复查任务能追溯到原查房记录，则直接归还原查房人，跳过再次接单。 */
+  DB.find('tasks', function (t) {
+    return t.type === 'room_inspection' && t.inspectionKind === 'recheck'
+      && t.status === 'pending' && !t.assigneeId;
+  }).forEach(function (t) {
+    var parentInsp = t.parentInspId ? DB.byId('roomInsp', t.parentInspId) : null;
+    if (!parentInsp) {
+      parentInsp = DB.find('roomInsp', function (x) {
+        return x.roomId === t.roomId && x.result === 'fail';
+      }).sort(function (a, b) { return b.endedAt - a.endedAt; })[0] || null;
+    }
+    var ownerId = parentInsp && parentInsp.inspectorId ? parentInsp.inspectorId : '';
+    if (!ownerId) return;
+    var now = Date.now();
+    DB.update('tasks', t.id, {
+      assigneeId: ownerId,
+      claimBy: ownerId,
+      claimAt: t.claimAt || now,
+      poolDeptId: '',
+      poolCap: '',
+      startedAt: 0,
+      roomScanAt: 0,
+      result: t.result || '整改完成，待原查房人复查'
+    });
+    Engine.Task.addStep(t.id, '验收数据升级：待复查任务自动归还原查房人，无需再次接单');
   });
 
   /* 验收版基线：seed 自带演示待办不能混入人工验收。
