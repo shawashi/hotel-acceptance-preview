@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 16:45 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 17:35 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -3556,6 +3556,30 @@ window.RoomSvc = (function () {
         refType: 'task', refId: c.taskId || c.followTaskId || ''
       });
     });
+    /* 查房发现的设备异常：工程完成即把对应整改项标记为 fixed。
+     * 当本房全部查房问题都已整改，自动生成待复查任务，让原查房人重新获得明确入口。 */
+    if (linkedTask && linkedTask.source === '查房发现设备异常' && roomId) {
+      var linkedIssues = DB.find('roomIssues', function (x) {
+        return AuthContext.inScope(x) && x.roomId === roomId && x.taskId === linkedTask.id && x.status === 'open';
+      });
+      linkedIssues.forEach(function (x) {
+        DB.update('roomIssues', x.id, { status: 'fixed', fixedAt: now, fixedBy: Engine.Session.me.id });
+      });
+      var stillOpenInspectionIssues = DB.find('roomIssues', function (x) {
+        return AuthContext.inScope(x) && x.roomId === roomId && x.status === 'open';
+      });
+      if (linkedIssues.length && !stillOpenInspectionIssues.length) {
+        var parentInspId = linkedIssues[0].inspId || '';
+        DB.update('rooms', roomId, { inspStatus: 'recheck' });
+        ensureInspectionTask(roomId, 'recheck', parentInspId);
+        Policy.whoHas('inspect').filter(function (u) { return AuthContext.inScope(u); }).forEach(function (u) {
+          Engine.notify(u.id, { type: 'task', title: DB.roomNo(roomId) + ' 房待复查',
+            content: '工程维修已完成，请复查确认', refType: 'room', refId: roomId });
+        });
+        tl(roomId, 'rectify', '工程维修完成，查房设备问题已整改，等待复查', { refType: 'workorder', refId: workOrderId || '' });
+      }
+    }
+
     if (roomId) {
       var otherRepair = DB.find('tasks', function (t) {
         return t.roomId === roomId && t.type === 'repair' && t.id !== taskId && t.status !== 'done' && t.status !== 'closed';
@@ -10481,6 +10505,9 @@ window.Engine = (function () {
           } else if (t.status === 'doing') {
             group = 'doing';
             subtitle = (t.location || DB.roomNo(t.roomId) + ' 房') + ' · 查房进行中 · 返回继续处理';
+          } else if (t.status === 'waitcheck') {
+            group = 'confirm';
+            subtitle = (t.location || DB.roomNo(t.roomId) + ' 房') + ' · 等待整改完成，完成后自动进入待复查';
           }
         }
         out.push({
@@ -13309,6 +13336,7 @@ function homeStaff(me) {
     + '</div>';
 
   html += inspectionPoolCard(me);
+  html += inspectionMineCard(me);
 
   /* ---- 客房员工首页：直接看到可作业客房，不必先进入任务中心 ---- */
   if (Policy.businessEnabled('housekeeping', me.hotelId) && Policy.can(me, 'clean') && typeof RoomSvc !== 'undefined' && RoomSvc.availableWork) {
@@ -14950,7 +14978,8 @@ App.act('wo-finish', function (el) {
             + '<div class="opt on" data-act="wo-reclean" data-v="0">现场无需再清洁</div>'
             + '<div class="opt" data-act="wo-reclean" data-v="1">需要客房复洁</div></div>'
             + '<div class="t-xs c3 mt8">仅当原清扫已经结束时需要确认；选择需要后自动生成“维修后清洁”任务。</div>') : '')
-      + '<div class="t-xs c3 mt16">使用耗材（自动出库并计入成本）</div>'
+      + '<details class="mt16"><summary class="btn btn-ghost btn-block">＋ 有使用维修物料时登记（可选）</summary>'
+      + '<div class="t-xs c3 mt12">仅使用物料时填写；未使用可直接提交完成。</div>'
       + '<div id="wo-mats">' + all.slice(0, 8).map(function (it) {
         return '<div class="row-b" style="padding:10px 0;border-bottom:1px solid var(--line)">'
           + '<div class="grow"><div class="t-sm">' + U.esc(it.name) + '</div><div class="t-xs c3">库存 ' + it.stock + it.unit + ' · ' + U.money(it.price) + '</div></div>'
@@ -14958,7 +14987,7 @@ App.act('wo-finish', function (el) {
           + '<div class="n" data-n="' + it.id + '">0</div>'
           + '<button data-act="mat-plus" data-id="' + it.id + '" data-p="' + it.price + '">＋</button></div></div>';
       }).join('') + '</div>'
-      + '<div class="row-b mt16"><div class="t-md t-w6">合计耗材成本</div><div class="t-lg t-w6 c-orange" id="mat-total">' + U.money(0) + '</div></div>'
+      + '<div class="row-b mt12"><div class="t-md t-w6">耗材成本</div><div class="t-lg t-w6 c-orange" id="mat-total">' + U.money(0) + '</div></div></details>'
       + Comp.photoPicker('wo-photo', 'wo-photo-n', (window._woPhotos || []).length, '完成后需留照片')
       + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
