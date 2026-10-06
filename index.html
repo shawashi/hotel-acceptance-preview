@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 20:37 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 21:00 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -10611,6 +10611,23 @@ window.Engine = (function () {
         }
       }
 
+      /* 团餐是餐厅执行工作：不能只发一条“通知”。餐厅执行人首页必须有可继续处理的工作项，
+       * 点击后进入餐饮工作台，由同一 teamMeal 状态机推进。未来日期也要提前备餐，因此不能只取 today()。 */
+      if (typeof TeamMeal !== 'undefined' && TeamMeal.canExecute && TeamMeal.canExecute(me)) {
+        TeamMeal.list({ from: U.ymd() }).filter(function (m) {
+          return ['received', 'preparing', 'ready'].indexOf(m.status) >= 0;
+        }).forEach(function (m) {
+          out.push({
+            id: 'teamMeal:' + m.id, refType: 'teamMeal', refId: m.id, kind: 'team_meal',
+            statusGroup: m.status === 'received' ? 'waiting' : 'doing',
+            priority: 'normal',
+            title: '团餐 · ' + (m.team || m.event || m.code),
+            subtitle: m.date + ' ' + (m.slot || '') + (m.time ? ' ' + m.time : '') + ' · ' + m.peopleCount + ' 人 · ' + TeamMeal.stName(m.status),
+            route: 'catering', dueAt: 0, createdAt: m.createdAt || 0
+          });
+        });
+      }
+
       /* 接班是前厅当前班次的即时工作，不应只藏在消息中心。 */
       DB.find('handovers', function (h) {
         return AuthContext.inScope(h) && h.toUserId === me.id && h.status === 'pending';
@@ -20350,10 +20367,12 @@ App.page('catering', {
     if (isFrontOnly) return html;
 
     /* ---------- 团餐 ---------- */
-    var tb = TeamMeal.board();
-    html += '<div class="card"><div class="card-head"><div class="card-title">今日团餐（' + tb.today.length + '）</div>'
+    var tbToday = TeamMeal.board();
+    var openMeals = TeamMeal.list({ from: U.ymd() }).filter(function (m) { return m.status !== 'canceled' && m.status !== 'done'; });
+    var tb = { today: tbToday.today, open: openMeals, done: tbToday.done };
+    html += '<div class="card"><div class="card-head"><div class="card-title">待执行团餐（' + tb.open.length + '）</div>'
       + (restaurantOn && TeamMeal.canArrange(u) ? '<div class="card-more" data-act="tm-new">+ 安排</div>' : '') + '</div>';
-    html += tb.today.length ? '<div class="list" style="margin:0">' + tb.today.map(function (m) {
+    html += tb.open.length ? '<div class="list" style="margin:0">' + tb.open.map(function (m) {
       return '<div class="li" style="align-items:flex-start">'
         + '<div class="li-icon" style="background:#faf4e9">🍱</div>'
         + '<div class="grow"><div class="t-md t-w6">' + U.esc(m.team || m.event || '团餐') + '</div>'
@@ -20366,7 +20385,7 @@ App.page('catering', {
         + (m.status === 'preparing' ? '<div class="btn btn-ghost btn-sm" data-act="tm-adv" data-id="' + m.id + '" data-k="ready">已备餐</div>' : '')
         + (m.status === 'ready' ? '<div class="btn btn-green btn-sm" data-act="tm-done" data-id="' + m.id + '">录实际人数完成</div>' : '')
         + '</div></div></div>';
-    }).join('') + '</div>' : Comp.empty('今日无团餐安排', '🍱');
+    }).join('') + '</div>' : Comp.empty('暂无待执行团餐', '🍱');
     html += '</div>';
 
     /* ---------- 员工餐（与客人早餐分对象分统计） ---------- */
