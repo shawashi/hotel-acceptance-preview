@@ -21770,6 +21770,7 @@ document.addEventListener('DOMContentLoaded', function () {
   bar.innerHTML = '<div><b>人工验收测试版</b><span>验收数据保存在当前浏览器；需要重新开始时可一键重置</span></div>'
     + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button id="acceptance-reset" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">重置验收数据</button>'
     + '<button id="acceptance-pms-checkout" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">模拟 PMS 退房</button>'
+    + '<button id="acceptance-inspection-eng" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试查房→工程</button>'
     + '<label>测试身份 <select id="acceptance-role">'
     + AcceptanceTest.accounts.map(function (a) {
       return '<option value="' + a.id + '">' + U.esc(a.label) + '</option>';
@@ -21778,6 +21779,7 @@ document.addEventListener('DOMContentLoaded', function () {
   var select = document.getElementById('acceptance-role');
   var resetBtn = document.getElementById('acceptance-reset');
   var pmsCheckoutBtn = document.getElementById('acceptance-pms-checkout');
+  var inspectionEngBtn = document.getElementById('acceptance-inspection-eng');
   var resetUser = '';
   try { resetUser = sessionStorage.getItem('hotel_acceptance_reset_user') || ''; sessionStorage.removeItem('hotel_acceptance_reset_user'); } catch (e) {}
   if (resetUser && DB.byId('users', resetUser)) {
@@ -21826,6 +21828,29 @@ document.addEventListener('DOMContentLoaded', function () {
     U.toast(roomNo + ' 房已模拟退房，退房清扫任务已自动生成');
     App.go('home');
     App.refresh();
+  });
+  inspectionEngBtn.addEventListener('click', function () {
+    var roomNo = window.prompt('生成“待查房”快速测试房号：', '803');
+    if (roomNo === null) return;
+    roomNo = String(roomNo || '').trim();
+    var room = DB.findOne('rooms', function (r) { return r.active !== 0 && String(r.number) === roomNo; });
+    if (!room) { U.toast('未找到 ' + roomNo + ' 房'); return; }
+    /* 清理该房未完成的清扫/查房/维修现场，直接建立“清扫已完成→待查房”的可靠断点。
+     * 仅验收版可用，正式产品无此入口。 */
+    DB.find('tasks', function (t) {
+      return t.roomId === room.id && ['housekeeping','room_inspection','repair','rectify'].indexOf(t.type) >= 0
+        && ['done','closed','canceled'].indexOf(t.status) < 0;
+    }).forEach(function (t) { DB.update('tasks', t.id, { status: 'canceled', completedAt: Date.now(), result: '验收快速场景重建' }); });
+    DB.find('roomClean', function (x) { return x.roomId === room.id && !x.endedAt; })
+      .forEach(function (x) { DB.update('roomClean', x.id, { endedAt: Date.now(), result: '验收快速场景重建' }); });
+    DB.find('roomInsp', function (x) { return x.roomId === room.id && !x.endedAt; })
+      .forEach(function (x) { DB.update('roomInsp', x.id, { endedAt: Date.now(), result: 'canceled', note: '验收快速场景重建' }); });
+    DB.update('rooms', room.id, { cleanStatus: 'clean', inspStatus: 'pending', blockStatus: '', currentCleanId: '' });
+    var t = RoomSvc.ensureInspectionTask(room.id, 'formal', '');
+    DB.flush();
+    Engine.Session.set('u_5'); Engine.boot(); select.value = 'u_5'; syncAcceptanceControls();
+    App.go(t && t.id ? ('task/' + t.id) : 'home'); App.refresh();
+    U.toast(roomNo + ' 房待查房测试已生成；当前已切换赵桂芳');
   });
   resetBtn.addEventListener('click', function () {
     if (!window.confirm('确认重置人工验收数据？当前浏览器里本轮验收产生的任务、消息和操作记录会清空，然后恢复到干净验收基线。')) return;
