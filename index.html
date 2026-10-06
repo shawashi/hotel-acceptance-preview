@@ -3564,6 +3564,36 @@ window.RoomSvc = (function () {
     return { ok: true, count: cleans.length };
   }
 
+  /** 为待查房/待复查生成真正的任务。
+   * 房间状态负责业务状态，tasks 负责“谁要做什么”的执行闭环；两者不能再混为一体。 */
+  function ensureInspectionTask(roomId, kind, parentInspId) {
+    var r = DB.byId('rooms', roomId);
+    if (!r) return null;
+    kind = kind === 'recheck' ? 'recheck' : 'formal';
+    var existed = DB.findOne('tasks', function (t) {
+      return AuthContext.inScope(t) && t.type === 'room_inspection' && t.roomId === roomId
+        && t.inspectionKind === kind && t.status !== 'done' && t.status !== 'closed';
+    });
+    if (existed) return existed;
+    var title = r.number + ' 房' + (kind === 'recheck' ? '待复查' : '待查房');
+    var t = Engine.Task.create({
+      type: 'room_inspection', source: kind === 'recheck' ? '整改完成' : '客房清扫完成',
+      title: title, deptId: 'd_hk', roomId: roomId, location: r.number + ' 房',
+      desc: kind === 'recheck' ? '整改完成，需重新查房确认' : '清扫完成，需具备查房能力的人员确认',
+      creatorId: Engine.Session.me ? Engine.Session.me.id : 'sys', assigneeId: '', dueMin: 30,
+      priority: r.priority || 'normal'
+    });
+    DB.update('tasks', t.id, {
+      poolDeptId: 'd_hk', poolCap: 'inspect', claimBy: '', claimAt: 0, lockVer: 1,
+      inspectionKind: kind, parentInspId: parentInspId || ''
+    });
+    Policy.whoHas('inspect').filter(function (u) { return AuthContext.inScope(u); }).forEach(function (u) {
+      Engine.notify(u.id, { type: 'task', title: title, content: '请接单后到房扫码开始查房',
+        refType: 'task', refId: t.id });
+    });
+    return DB.byId('tasks', t.id);
+  }
+
   /**
    * 完成清扫
    * @param result 'normal' 正常完成；其余为特殊结果（不计完成）
@@ -3621,6 +3651,7 @@ window.RoomSvc = (function () {
     if (needInspect) patch.inspStatus = 'pending';
     else patch.inspStatus = '';
     DB.update('rooms', c.roomId, patch);
+    var inspectionTask = needInspect ? ensureInspectionTask(c.roomId, 'formal', '') : null;
     /* 换房后的“简单整理”在无需查房门店里，清扫完成就是复核闭环，不能继续挂 reviewStatus=tidying。 */
     if (!needInspect && r.reviewStatus === 'tidying') {
       var tidyReview = DB.findOne('roomReview', function (x) {
@@ -3636,7 +3667,7 @@ window.RoomSvc = (function () {
     if (c.taskId) Engine.Task.finish(c.taskId, '清扫完成' + (o.note ? '：' + o.note : ''));
     notifyFrontDesk(r.number, needInspect ? 'cleaned-wait-inspect' : 'cleaned');
     Engine.log && Engine.log('完成清扫', r.number);
-    return { ok: true, finished: true, clean: DB.byId('roomClean', cleanId), needInspect: needInspect };
+    return { ok: true, finished: true, clean: DB.byId('roomClean', cleanId), needInspect: needInspect, inspectionTask: inspectionTask };
   }
 
   /** 清扫本身就是报备：通知前厅（V4 §8.2 不再要求员工多按一次） */
@@ -3669,6 +3700,25 @@ window.RoomSvc = (function () {
     var sg = ServiceGuard.check({ record: r, capability: 'inspect', write: true }); if (!sg.ok) return sg;
     var expected = (o.kind === 'recheck') ? 'recheck' : 'pending';
     if (r.inspStatus !== expected) return { ok: false, reason: expected === 'recheck' ? '该房间当前不在待复查状态' : '该房间当前不在待查房状态' };
+
+    /* 查房执行必须经过“唯一任务 → 接单 → 到房扫码”。
+     * 房间状态本身不能直接启动查房，否则快捷入口会绕过责任锁和现场确认。 */
+    var inspectKind = expected === 'recheck' ? 'recheck' : 'formal';
+    var inspectTask = DB.findOne('tasks', function (t) {
+      return AuthContext.inScope(t) && t.type === 'room_inspection' && t.roomId === roomId
+        && t.inspectionKind === inspectKind && t.status !== 'done' && t.status !== 'closed';
+    });
+    if (!inspectTask) {
+      inspectTask = ensureInspectionTask(roomId, inspectKind, o.parentId || '');
+      return { ok: false, reason: '已生成查房任务，请先接单，再到房扫码开始', task: inspectTask };
+    }
+    if (!o.taskId || o.taskId !== inspectTask.id) {
+      return { ok: false, reason: '请从查房任务进入，并完成到房扫码后开始查房', task: inspectTask };
+    }
+    if (inspectTask.assigneeId !== me.id || inspectTask.claimBy !== me.id || !inspectTask.claimAt) {
+      return { ok: false, reason: '请先接下该查房任务，再到房扫码开始', task: inspectTask };
+    }
+
     var running = openInsp(roomId);
     if (running) return { ok: false, reason: '该房间正在查房中', insp: running };
     var clean = lastClean(roomId);
@@ -3678,9 +3728,20 @@ window.RoomSvc = (function () {
       snap: Engine.Snapshot.of(me.id),                 // 当时部门/岗位
       startedAt: Date.now(), endedAt: 0, duration: 0,
       kind: o.kind || 'formal',                        // formal 正式查房 / recheck 复查
-      parentId: o.parentId || '', cleaningTaskId: clean ? clean.id : '', cleanerId: clean ? clean.cleanerId : '',
+      parentId: o.parentId || '', taskId: o.taskId || '',
+      cleaningTaskId: clean ? clean.id : '', cleanerId: clean ? clean.cleanerId : '',
       result: '', issueCount: 0, note: '', photos: []
     }));
+    if (o.taskId) {
+      var it = DB.byId('tasks', o.taskId);
+      if (it) {
+        DB.update('tasks', o.taskId, {
+          status: 'doing', assigneeId: me.id, startedAt: Date.now(),
+          claimBy: it.claimBy || me.id, claimAt: it.claimAt || Date.now(), snapDoer: Engine.Snapshot.of(me.id)
+        });
+        Engine.Task.addStep(o.taskId, me.name + ' 已到房扫码，开始查房');
+      }
+    }
     DB.update('rooms', roomId, { inspStatus: 'inspecting' });
     tl(roomId, 'inspect', me.name + ' 开始查房', { refType: 'roomInsp', refId: ins.id });
     Engine.log && Engine.log('开始查房', r.number);
@@ -3718,6 +3779,16 @@ window.RoomSvc = (function () {
       endedAt: now, duration: dur, result: result,
       issueCount: issues.length, note: o.note || '', photos: o.photos || []
     });
+    if (ins.taskId) {
+      var inspectTask = DB.byId('tasks', ins.taskId);
+      if (inspectTask && inspectTask.status !== 'done' && inspectTask.status !== 'closed') {
+        DB.update('tasks', ins.taskId, {
+          status: 'done', completedAt: now, result: result === 'pass' ? '查房合格' : ('查房发现 ' + issues.length + ' 项问题'),
+          assigneeId: me.id, snapDone: Engine.Snapshot.of(me.id)
+        });
+        Engine.Task.addStep(ins.taskId, result === 'pass' ? '查房合格，任务完成' : '查房完成，已生成整改事项');
+      }
+    }
 
     if (result === 'pass') {
       DB.update('rooms', ins.roomId, { inspStatus: 'passed', reviewerId: me.id });
@@ -3814,6 +3885,7 @@ window.RoomSvc = (function () {
     var all = DB.find('roomIssues', function (x) { return x.roomId === q.roomId && x.status === 'open'; });
     if (!all.length) {
       DB.update('rooms', q.roomId, { inspStatus: 'recheck' });
+      var recheckTask = ensureInspectionTask(q.roomId, 'recheck', q.inspId || '');
       tl(q.roomId, 'rectify', '整改完成，等待复查', { refType: 'roomIssues', refId: issueId });
       var me = Engine.Session.me;
       Policy.whoHas('inspect').forEach(function (u) {
@@ -3833,7 +3905,11 @@ window.RoomSvc = (function () {
     if (issues.some(function (x) { return x.fixedBy === me.id; })) {
       return { ok: false, reason: '整改执行人不能复查自己整改的房间，请由另一名有查房权限的人员复查' };
     }
-    return inspStart(roomId, { kind: 'recheck', parentId: parentInspId || '' });
+    var recheckTask = DB.findOne('tasks', function (t) {
+      return AuthContext.inScope(t) && t.type === 'room_inspection' && t.roomId === roomId
+        && t.inspectionKind === 'recheck' && t.status !== 'done' && t.status !== 'closed';
+    }) || ensureInspectionTask(roomId, 'recheck', parentInspId || '');
+    return inspStart(roomId, { kind: 'recheck', parentId: parentInspId || '', taskId: recheckTask ? recheckTask.id : '' });
   }
 
   function transferClean(cleanId, toUserId, reason) {
@@ -4365,7 +4441,7 @@ window.RoomSvc = (function () {
     cleanStats: cleanStats, inspStats: inspStats, personToday: personToday,
     /* V4.2 §4 / §5 */
     openMainTask: openMainTask, requestClean: requestClean, batchRequestClean: batchRequestClean,
-    tempClean: tempClean, inspectPool: inspectPool
+    tempClean: tempClean, inspectPool: inspectPool, ensureInspectionTask: ensureInspectionTask
   };
 })();
 
@@ -6776,6 +6852,24 @@ window.Engine = (function () {
       if (t.status === 'doing' && t.assigneeId === (Session.me && Session.me.id)) return { ok: true, repeat: true, task: t };
       if (t.status !== 'pending' && t.status !== 'wait') return { ok: false, reason: '任务当前状态不能接单' };
 
+      /* 房间查房任务同样遵循“接单≠到房≠开始查房”。
+       * 接单只锁定查房责任人，真正开始必须到房扫码。 */
+      if (t.type === 'room_inspection' && t.roomId) {
+        var inspectClaimUserId = Session.me && Session.me.id;
+        if (!inspectClaimUserId) return { ok: false, reason: '未登录，不能接单' };
+        if (t.assigneeId === inspectClaimUserId && t.claimBy === inspectClaimUserId && t.claimAt) {
+          return { ok: true, repeat: true, claimed: true, task: t };
+        }
+        var inspectClaimNow = Date.now();
+        DB.update('tasks', id, {
+          status: 'pending', assigneeId: inspectClaimUserId, claimBy: inspectClaimUserId, claimAt: inspectClaimNow,
+          snapAssignee: Snapshot.of(inspectClaimUserId)
+        });
+        Task.addStep(id, DB.userName(inspectClaimUserId) + ' 已接查房任务，待到房扫码开始');
+        log('查房接单待到房', t.code);
+        return { ok: true, claimed: true, task: DB.byId('tasks', id) };
+      }
+
       /* 房间型客房任务：接单只锁定责任人，不代表已经到房/开始清扫。
        * 真正进入 doing 必须由 RoomSvc 扫码开始，以免“接单=开始”导致到房时间和清扫时长失真。 */
       if (t.type === 'housekeeping' && t.roomId) {
@@ -7017,6 +7111,12 @@ window.Engine = (function () {
         var at = t.completedAt || t.verifiedAt || 0;
         return !!at && U.ymd(at) === key;
       }).length;
+      /* 房间查房是 roomInsp 业务记录，不会生成普通 tasks 记录。
+       * 任务中心的“今日完成”必须计入本人当天完成的查房，否则主管完成查房后仍显示 0。 */
+      var doneInspections = DB.find('roomInsp', function (x) {
+        return x.inspectorId === uid && !!x.endedAt && U.ymd(x.endedAt) === key && AuthContext.inScope(x);
+      }).length;
+      done += doneInspections;
       var overdue = open.filter(Task.isOverdue).length;
       return { total: open.length, done: done, open: open.length, overdue: overdue };
     }
@@ -7335,6 +7435,19 @@ window.Engine = (function () {
       if (p.voiceSec) detail += '（语音 ' + p.voiceSec + ' 秒）';
 
       if (type.repair) {
+        /* 同一次现场上报必须幂等：按钮连点、网络重试都只能形成一张工程任务。
+         * clientKey 由调用端按业务上下文生成；服务层仍负责兜底去重。 */
+        if (p.clientKey) {
+          var existed = DB.findOne('tasks', function (t) {
+            return AuthContext.inScope(t) && t.type === 'repair' && t.clientKey === p.clientKey
+              && t.status !== 'done' && t.status !== 'closed';
+          });
+          if (existed) {
+            return { ok: true, repeat: true, task: existed,
+              wo: existed.woId ? DB.byId('workOrders', existed.woId) : null,
+              deptId: existed.poolDeptId || existed.deptId || '', autoDispatch: false, pool: true };
+          }
+        }
         var bg = Policy.requireBusiness('maintenance', { name: '维修能力' });
         if (bg) return bg;
         // → 维修能力池：部门只作统计标签，实际接手人以 maintain capability 为准。
@@ -7352,6 +7465,7 @@ window.Engine = (function () {
         if (!poolRes || poolRes.ok === false) return poolRes || { ok: false, reason: '维修任务池创建失败' };
         var task = poolRes.task;
         DB.update('tasks', task.id, {
+          clientKey: p.clientKey || '',
           category: type.cat, issueTypeKey: type.key, issueTypeName: type.name,
           needAccept: requiresAcceptance ? 1 : 0,
           poolDeptId: routeDept, poolCap: 'maintain', businessCapability: 'maintenance'
@@ -10309,6 +10423,12 @@ window.Engine = (function () {
       if (!me || !AuthContext.checkScope(me).ok) return [];
       var out = [];
       Task.homeQueue(me.id).forEach(function (t) {
+        /* 共享待查房属于“可领取工作”，不是每个有 inspect 能力人员的个人待办。
+         * 只有认领后才进入“我的工作”，避免同一房间同时出现在多个人的个人任务里。 */
+        if (t.type === 'room_inspection' && !t.assigneeId) {
+          var gmFallbackInspection = (me.roles || []).indexOf('gm') >= 0 && !MyWork.hasNonGMOperator('inspect');
+          if (!gmFallbackInspection) return;
+        }
         var activeClean = t.type === 'housekeeping' ? DB.findOne('roomClean', function (c) {
           return c.taskId === t.id && !c.endedAt && c.cleanerId === me.id;
         }) : null;
@@ -10323,6 +10443,15 @@ window.Engine = (function () {
         } else if (activeClean && activeClean.repairPending) {
           subtitle = (t.location || DB.roomNo(t.roomId) + ' 房') + ' · 工程处理中，可继续清扫';
         }
+        if (t.type === 'room_inspection' && t.assigneeId === me.id) {
+          if (t.status === 'pending' && !t.startedAt) {
+            group = 'waiting';
+            subtitle = (t.location || DB.roomNo(t.roomId) + ' 房') + ' · 已接单 · 待到房扫码';
+          } else if (t.status === 'doing') {
+            group = 'doing';
+            subtitle = (t.location || DB.roomNo(t.roomId) + ' 房') + ' · 查房进行中 · 返回继续处理';
+          }
+        }
         out.push({
           id: 'task:' + t.id, refType: 'task', refId: t.id, kind: t.type || 'task',
           statusGroup: group, priority: t.priority || 'normal',
@@ -10331,20 +10460,25 @@ window.Engine = (function () {
         });
       });
 
-      /* 待查房/待复查没有必要额外造一张普通任务；作为统一工作项聚合进来。 */
-      if (Policy.can(me, 'inspect') && !((me.roles || []).indexOf('gm') >= 0 && MyWork.hasNonGMOperator('inspect'))) {
-        DB.find('rooms', function (r) {
-          return AuthContext.inScope(r) && (r.inspStatus === 'pending' || r.inspStatus === 'recheck');
-        }).forEach(function (r) {
+      /* 已认领并开始的查房也必须继续留在“我的工作”。否则房间状态从 pending 变为 inspecting 后，
+       * 工作项会瞬间消失，只能绕到快捷入口找回来。 */
+      if (Policy.can(me, 'inspect')) {
+        DB.find('roomInsp', function (x) {
+          return AuthContext.inScope(x) && x.inspectorId === me.id && !x.endedAt && !x.taskId;
+        }).forEach(function (x) {
+          var rr = DB.byId('rooms', x.roomId);
           out.push({
-            id: 'inspect:' + r.id, refType: 'room', refId: r.id, kind: 'inspection',
-            statusGroup: 'waiting', priority: r.priority || 'normal',
-            title: r.number + ' 房' + (r.inspStatus === 'recheck' ? '待复查' : '待查房'),
-            subtitle: '查房 · 到房认领后开始', route: 'hk?tab=inspect',
-            dueAt: 0, createdAt: Date.now()
+            id: 'inspection:' + x.id, refType: 'inspection', refId: x.id, kind: 'inspection',
+            statusGroup: 'doing', priority: (rr && rr.priority) || 'normal',
+            title: (rr ? rr.number : DB.roomNo(x.roomId)) + ' 房' + (x.kind === 'recheck' ? '复查' : '查房'),
+            subtitle: '查房进行中 · 返回继续处理', route: 'hk-inspect',
+            dueAt: 0, createdAt: x.startedAt || Date.now()
           });
         });
       }
+
+      /* 待查房/待复查统一由 room_inspection 任务承接。
+       * 房间 inspStatus 只保存业务状态，不再额外合成一条“伪任务”，避免快捷入口绕过接单/扫码状态机。 */
 
       /* 已存在的食材采购即使门店后来关闭餐厅，也必须保留处理出口。 */
       if (Policy.can(me, 'accept_food') && !((me.roles || []).indexOf('gm') >= 0 && MyWork.hasNonGMOperator('accept_food'))) {
@@ -10405,17 +10539,16 @@ window.Engine = (function () {
         });
       });
 
-      /* “我的工作”按任务产生时间倒序，最新任务固定在最上方。
-       * 同一时间戳才用优先级/状态兜底，避免历史超时任务长期压住刚产生的新任务。 */
-      var rank = { alert: 0, paused: 1, doing: 2, confirm: 3, temporary: 4, waiting: 5 };
+      /* “我的工作”先保证本人已经在执行/需要立即续做的事项不被新来的普通待接任务挤出首屏。
+       * 同一状态组内再按业务优先级和产生时间排序；异常仍突出，但普通待接不得压住进行中工作。 */
+      var rank = { doing: 0, paused: 1, alert: 2, confirm: 3, temporary: 4, waiting: 5 };
       return out.sort(function (a, b) {
-        var created = (b.createdAt || 0) - (a.createdAt || 0);
-        if (created) return created;
-        var prio = ((b.priority === 'urgent' ? 3 : b.priority === 'high' ? 2 : 1) - (a.priority === 'urgent' ? 3 : a.priority === 'high' ? 2 : 1));
-        if (prio) return prio;
         var ar = Object.prototype.hasOwnProperty.call(rank, a.statusGroup) ? rank[a.statusGroup] : 9;
         var br = Object.prototype.hasOwnProperty.call(rank, b.statusGroup) ? rank[b.statusGroup] : 9;
-        return ar - br;
+        if (ar !== br) return ar - br;
+        var prio = ((b.priority === 'urgent' ? 3 : b.priority === 'high' ? 2 : 1) - (a.priority === 'urgent' ? 3 : a.priority === 'high' ? 2 : 1));
+        if (prio) return prio;
+        return (b.createdAt || 0) - (a.createdAt || 0);
       });
     },
     groups: function (userId) {
@@ -13051,6 +13184,60 @@ function trendBars(arr) {
 }
 
 /* ==========================================================================
+ * 查房能力工作面板
+ * - 查房是 capability，不绑定客房主管岗位。
+ * - 未认领任务属于共享“待接查房”，不能伪装成每个人的个人待办。
+ * - 认领后才进入“我的查房/我的工作”，并必须到房扫码后才能开始。
+ * ======================================================================= */
+function inspectionPoolTasks(me) {
+  if (!me || !Policy.can(me, 'inspect')) return [];
+  return DB.find('tasks', function (t) {
+    return AuthContext.inScope(t) && t.type === 'room_inspection'
+      && t.status === 'pending' && !t.assigneeId
+      && (t.poolCap ? Policy.can(me, t.poolCap) : t.poolDeptId === me.deptId);
+  }).sort(function (a, b) {
+    var pa = a.priority === 'urgent' ? 3 : (a.priority === 'high' ? 2 : 1);
+    var pb = b.priority === 'urgent' ? 3 : (b.priority === 'high' ? 2 : 1);
+    return pb - pa || (a.dueAt || 0) - (b.dueAt || 0);
+  });
+}
+function inspectionMineTasks(me) {
+  if (!me || !Policy.can(me, 'inspect')) return [];
+  return DB.find('tasks', function (t) {
+    return AuthContext.inScope(t) && t.type === 'room_inspection'
+      && t.assigneeId === me.id && t.status !== 'done' && t.status !== 'closed';
+  }).sort(function (a, b) { return (a.dueAt || 0) - (b.dueAt || 0); });
+}
+function inspectionPoolCard(me) {
+  var list = inspectionPoolTasks(me);
+  if (!list.length) return '';
+  return '<div class="card"><div class="card-head"><div class="card-title">待接查房 <span class="chip chip-blue">' + list.length + '</span></div>'
+    + '<div class="card-more" data-act="go-hk-inspect">全部 ›</div></div>'
+    + list.slice(0, 5).map(function (t) {
+      var room = DB.byId('rooms', t.roomId);
+      return '<div class="li" data-act="mywork-open" data-route="task/' + U.esc(t.id) + '">'
+        + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : DB.roomNo(t.roomId)) + ' 房 · '
+        + (t.inspectionKind === 'recheck' ? '待复查' : '待查房') + ' <span class="chip">共享待接</span></div>'
+        + '<div class="t-xs c3 mt8">有查房能力的人员均可认领；接单后才进入个人工作</div></div><div class="li-arrow">›</div></div>';
+    }).join('') + '</div>';
+}
+function inspectionMineCard(me) {
+  var list = inspectionMineTasks(me);
+  if (!list.length) return '';
+  return '<div class="card"><div class="card-head"><div class="card-title">我的查房 <span class="chip chip-blue">' + list.length + '</span></div>'
+    + '<div class="card-more" data-act="go-hk-inspect">查房工作台 ›</div></div>'
+    + list.slice(0, 5).map(function (t) {
+      var room = DB.byId('rooms', t.roomId);
+      var waiting = t.status === 'pending' && !t.startedAt;
+      return '<div class="li" data-act="mywork-open" data-route="task/' + U.esc(t.id) + '">'
+        + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : DB.roomNo(t.roomId)) + ' 房 · '
+        + (t.inspectionKind === 'recheck' ? '复查' : '查房') + ' '
+        + (waiting ? '<span class="chip chip-orange">已接单·待扫码</span>' : '<span class="chip chip-blue">进行中</span>') + '</div>'
+        + '<div class="t-xs c3 mt8">' + (waiting ? '到房扫描对应房间二维码后开始' : '查房进行中，可从这里返回继续') + '</div></div><div class="li-arrow">›</div></div>';
+    }).join('') + '</div>';
+}
+
+/* ==========================================================================
  * 普通员工首页：4—6 个入口 + 今日待办一键完成
  * ======================================================================= */
 function homeStaff(me) {
@@ -13069,6 +13256,8 @@ function homeStaff(me) {
     + '<div><div class="t-lg t-w6">' + greet + '，' + U.esc(me.name) + '</div>'
     + '<div class="t-xs c3 mt8">' + U.esc(DB.deptName(me.deptId)) + ' · ' + U.esc(me.post) + ' · ' + U.md() + ' ' + U.weekdayCN() + '</div></div></div>'
     + '</div>';
+
+  html += inspectionPoolCard(me);
 
   /* ---- 客房员工首页：直接看到可作业客房，不必先进入任务中心 ---- */
   if (Policy.businessEnabled('housekeeping', me.hotelId) && Policy.can(me, 'clean') && typeof RoomSvc !== 'undefined' && RoomSvc.availableWork) {
@@ -13110,8 +13299,8 @@ function homeStaff(me) {
   /* 同一张待清扫任务已经在“可作业客房”展示时，不在“我的工作”重复出现；
    * 扫码真正开始后 availableWork 会自动移除，此时任务再进入“我的工作”的进行中视图。 */
   myWork = myWork.filter(function (w) { return !(w.refType === 'task' && hkAvailableTaskIds[w.refId]); });
-  /* 首页再做一次稳定倒序，保证所有岗位“最新任务在最上方”。 */
-  myWork.sort(function (a, b) { return (b.createdAt || 0) - (a.createdAt || 0); });
+  /* Engine.MyWork 已按“进行中/待继续优先，其次异常/确认，普通待接最后”排序。
+   * 首页不得再按创建时间覆盖该顺序，否则正在执行的工作会被新待接事项挤出首屏。 */
 
   /* ---- V1.1 统一“我的工作” ---- */
   html += '<div class="card"><div class="card-head"><div class="card-title">我的工作'
@@ -13283,6 +13472,9 @@ function homeManager(me) {
     + '<div class="hero-kpi"><div class="v" style="color:' + (inc.length ? '#ff9b9b' : '#fff') + '">' + inc.length + '</div><div class="k">异常</div></div>'
     + '</div></div>';
 
+  html += inspectionMineCard(me);
+  html += inspectionPoolCard(me);
+
   if (pending.length || inc.length || attentionNotices.length) {
     html += '<div class="card"><div class="card-head"><div class="card-title">需要我处理</div></div>';
     if (inc.length) html += inc.slice(0, 2).map(function (x) { return Comp.incidentRow(x); }).join('');
@@ -13300,7 +13492,7 @@ function homeManager(me) {
 
   html += '<div class="card"><div class="card-head"><div class="card-title">快捷处理</div></div><div class="enter-grid">'
     + (isHK ? enterBox('go-hk-work', '客房作业', '🧹', '#fdf1e5', 0) : '')
-    + (isHK ? enterBox('go-hk-inspect', '查房', '🔍', '#eaf1fd', RoomSvc.inspectPool().length) : '')
+    + (isHK ? enterBox('go-hk-inspect', '查房', '🔍', '#eaf1fd', inspectionPoolTasks(me).length + inspectionMineTasks(me).length) : '')
     + enterBox('open-incident', '异常', '⚠️', '#fdecec', inc.length)
     + enterBox('tab', '任务', '📋', '#eaf1fd', 0)
     + enterBox('go-stats', '数据', '📊', '#f1f3f6', 0)
@@ -13334,6 +13526,9 @@ function homeManagerLegacy(me) {
     + '<div class="t-xs" style="color:rgba(255,255,255,.7)">本部门完成率 ' + U.pct(done, allToday.length) + '%</div>'
     + '<div class="t-xs" style="color:rgba(255,255,255,.7)">异常 ' + inc.length + ' 项</div></div>'
     + '</div>';
+
+  html += inspectionMineCard(me);
+  html += inspectionPoolCard(me);
 
   html += '<div class="card"><div class="kpi-grid c3">'
     + kpiBox(pending.length, '待我审批', 'c-orange', 'open-approval')
@@ -13422,6 +13617,9 @@ function homeGM(me) {
     + '<div class="t-xs mt12" style="position:relative;z-index:2;color:rgba(255,255,255,.72)">'
     + (normal ? '当前没有需要店长介入的异常或审批。正常事项由各岗位自行闭环。' : '只展示需要店长介入的事项；正常流水不逐条占用你的注意力。')
     + '</div></div>';
+
+  html += inspectionMineCard(me);
+  html += inspectionPoolCard(me);
 
   if (incidents.length) {
     html += '<div class="card"><div class="card-head"><div class="card-title">需要我关注'
@@ -13673,6 +13871,14 @@ App.page('tasks', {
     var list = Engine.Task.query(opt);
     if (statusFilter === 'overdue') list = list.filter(Engine.Task.isOverdue);
     if (r.params.type) list = list.filter(function (t) { return t.type === r.params.type; });
+    /* “已完成”不仅要有普通任务，也要能追溯本人完成的房间查房。
+     * 查房记录存于 roomInsp，不应因为不是 tasks 记录就在任务中心消失。 */
+    var doneInspections = [];
+    if (tab === 'mine' && statusFilter === 'done') {
+      doneInspections = DB.find('roomInsp', function (x) {
+        return x.inspectorId === me.id && !!x.endedAt && AuthContext.inScope(x);
+      }).sort(function (a, b) { return b.endedAt - a.endedAt; });
+    }
 
     /* “我的工作”使用 V1.1 聚合队列：维修、清扫、查房、采购验收、餐饮收尾等从一个入口进入。
      * 本部门/全部仍保留普通任务视角，供主管查看。 */
@@ -13721,10 +13927,21 @@ App.page('tasks', {
       }).join('') + '</div>' : Comp.empty(statusFilter === 'checking' ? '暂无待确认/验收事项' : '当前没有需要处理的工作', '✅');
       if (workList.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + workList.length + ' 条</div>';
     } else {
+      if (doneInspections.length) {
+        html += '<div class="list">' + doneInspections.slice(0, 60).map(function (ins) {
+          var room = DB.byId('rooms', ins.roomId);
+          var result = ins.result === 'pass' ? '合格' : (ins.result === 'fail' ? '发现问题' : '已完成');
+          return '<div class="li" data-act="open-room" data-id="' + U.esc(ins.roomId) + '">'
+            + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : '') + ' 房'
+            + (ins.kind === 'recheck' ? '复查' : '查房') + ' <span class="chip chip-green">已完成</span></div>'
+            + '<div class="t-xs c3 mt8">' + U.esc(result) + ' · ' + U.hm(ins.endedAt)
+            + (ins.duration != null ? ' · 用时 ' + ins.duration + ' 分钟' : '') + '</div></div><div class="li-arrow">›</div></div>';
+        }).join('') + '</div>';
+      }
       html += list.length
         ? '<div class="list">' + list.slice(0, 60).map(Comp.taskRow).join('') + '</div>'
-        : Comp.empty(statusFilter === 'done' ? '暂无已完成任务' : '没有待处理任务', '✅');
-      if (list.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + list.length + ' 条</div>';
+        : (!doneInspections.length ? Comp.empty(statusFilter === 'done' ? '暂无已完成任务' : '没有待处理任务', '✅') : '');
+      if (list.length > 60 || doneInspections.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条记录</div>';
     }
     return html;
   }
@@ -13764,15 +13981,20 @@ App.page('task', {
     var S = Engine.Session, me = S.user();
     var wo = t.woId ? DB.byId('workOrders', t.woId) : null;
     var isRoomCleanTask = t.type === 'housekeeping' && !!t.roomId;
+    var isRoomInspectionTask = t.type === 'room_inspection' && !!t.roomId;
     var linkedClean = isRoomCleanTask
       ? DB.findOne('roomClean', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
+    var linkedInspection = isRoomInspectionTask
+      ? DB.findOne('roomInsp', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
     var isAssignee = t.assigneeId === me.id;
     var canClaimPool = !t.assigneeId && (t.poolCap ? Policy.can(me, t.poolCap) : t.poolDeptId === me.deptId);
     var claimedWaitingRoom = isRoomCleanTask && isAssignee && !linkedClean
       && (t.status === 'pending' || (t.status === 'doing' && !t.startedAt));
+    var claimedWaitingInspection = isRoomInspectionTask && isAssignee && !linkedInspection
+      && t.status === 'pending';
     var overdue = Engine.Task.isOverdue(t);
     var left = t.dueAt ? U.leftText(t.dueAt) : null;
-    var taskChip = claimedWaitingRoom
+    var taskChip = (claimedWaitingRoom || claimedWaitingInspection)
       ? '<span class="chip chip-blue">已接单 · 待到房</span>'
       : Comp.taskStatusChip(t);
     var displaySource = t.repairTaskId ? '工程维修联动自动生成' : (t.source || '');
@@ -13811,11 +14033,27 @@ App.page('task', {
       }
     }
 
+    /* 房间查房任务：接单只锁定责任人，扫码后才进入真正查房中。 */
+    if (isRoomInspectionTask && t.status !== 'done' && t.status !== 'closed') {
+      var inspActs = [];
+      if (claimedWaitingInspection) {
+        inspActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-insp-scan" data-id="' + t.id + '">📷 扫描 ' + U.esc(DB.roomNo(t.roomId)) + ' 房二维码并开始查房</button>');
+      } else if (t.status === 'pending' && !t.assigneeId && (canClaimPool || S.isManager() || S.isGM())) {
+        inspActs.push('<button class="btn btn-primary btn-block btn-lg" data-act="task-accept" data-id="' + t.id + '">接单</button>');
+      } else if (linkedInspection && linkedInspection.inspectorId === me.id && t.status === 'doing') {
+        inspActs.push('<button class="btn btn-primary btn-block" data-act="task-insp-continue">继续查房</button>');
+      }
+      if (inspActs.length) {
+        html += '<div class="card" style="border:1px solid var(--line-2)"><div class="card-head"><div class="card-title">当前操作</div></div>'
+          + '<div class="row" style="gap:10px;flex-wrap:wrap">' + inspActs.join('') + '</div></div>';
+      }
+    }
+
     /* 所有角色统一执行优先：详细资料默认折叠；权限决定能否查看，不决定是否占满首屏。 */
     var compactTaskDetail = true;
     var compactRoomInfo = compactTaskDetail;
     var detailFields = '<div class="card card-tight">'
-      + Comp.field('任务类型', U.esc({ inspection: '定时巡检', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
+      + Comp.field('任务类型', U.esc({ inspection: '定时巡检', room_inspection: '客房查房', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
       + Comp.field('任务来源', U.esc(displaySource || '—'))
@@ -14009,6 +14247,39 @@ App.act('task-accept', function (el) {
   App.refresh();
 });
 
+App.act('task-insp-scan', function (el) {
+  var taskId = el.getAttribute('data-id');
+  var t = DB.byId('tasks', taskId);
+  if (!t || !t.roomId) return;
+  var roomNo = DB.roomNo(t.roomId);
+  if (window.AcceptanceTest) {
+    App.sheet({
+      title: '扫描房间二维码',
+      body: '<div class="pad" style="padding:8px 18px 4px"><div class="center" style="padding:18px 0 10px">'
+        + '<div style="font-size:46px">📷</div><div class="t-lg t-w6 mt8">请扫描 ' + U.esc(roomNo) + ' 房二维码</div>'
+        + '<div class="t-sm c3 mt8">二维码用于确认已到正确房间；核验后才正式开始查房。</div></div>'
+        + '<button class="btn btn-primary btn-block btn-lg mt16" data-act="task-insp-scan-submit" data-id="' + taskId + '" data-room="' + t.roomId + '">模拟扫描 ' + U.esc(roomNo) + ' 房二维码</button></div>',
+      foot: '<button class="btn btn-ghost btn-block" data-act="close-sheet">取消</button>'
+    });
+    return;
+  }
+  U.toast('请使用小程序扫码功能扫描 ' + roomNo + ' 房二维码');
+});
+App.act('task-insp-scan-submit', function (el) {
+  var taskId = el.getAttribute('data-id');
+  var t = DB.byId('tasks', taskId);
+  if (!t || el.getAttribute('data-room') !== t.roomId) { U.toast('二维码与任务房间不匹配'); return; }
+  var res = RoomSvc.inspStart(t.roomId, {
+    kind: t.inspectionKind === 'recheck' ? 'recheck' : 'formal',
+    parentId: t.parentInspId || '', taskId: t.id
+  });
+  if (!res || res.ok === false) { U.toast((res && res.reason) || '无法开始查房'); return; }
+  DB.flush(); App.closeSheet();
+  U.toast(DB.roomNo(t.roomId) + ' 房核验通过，已开始查房');
+  App.go('hk-inspect');
+});
+App.act('task-insp-continue', function () { App.go('hk-inspect'); });
+
 App.act('task-clean-scan', function (el) {
   var taskId = el.getAttribute('data-id');
   var t = DB.byId('tasks', taskId);
@@ -14173,6 +14444,7 @@ function woRow(w) {
  * ======================================================================= */
 var _rp = { roomId: '', area: '', type: '', desc: '', photos: [], voice: 0, equipId: '', cleanId: '', lockedRoom: false };
 var _rpRepairDecision = { cleanId: '', roomId: '' };
+var _rpSubmitting = false;
 
 App.page('report', {
   title: '上报问题',
@@ -14340,14 +14612,20 @@ App.act('rp-voice', function () {
 });
 
 App.act('rp-submit', function () {
+  if (_rpSubmitting) { U.toast('正在提交，请勿重复点击'); return; }
   if (!_rp.type) { U.toast('请选择问题类型'); return; }
+  _rpSubmitting = true;
   _rp.desc = (document.getElementById('rp-desc') || {}).value || '';
   var photos = (_rp.photos || []).map(function (source, i) { return 'report_' + source + '_' + Date.now() + '_' + i; });
   var res = Engine.Report.submit({
     roomId: _rp.roomId, issueType: _rp.type, desc: _rp.desc || '',
-    photos: photos, voiceSec: _rp.voice, equipId: _rp.equipId
+    photos: photos, voiceSec: _rp.voice, equipId: _rp.equipId,
+    clientKey: _rp.cleanId ? ('clean-report:' + _rp.cleanId + ':' + _rp.type) : ''
   });
-  if (!res || res.ok === false || !res.task) { U.toast((res && res.reason) || '上报失败'); return; }
+  if (!res || res.ok === false || !res.task) {
+    _rpSubmitting = false;
+    U.toast((res && res.reason) || '上报失败'); return;
+  }
   if (_rp.cleanId && res.wo) {
     var link = RoomSvc.cleanWaitRepair(_rp.cleanId, res.task.id);
     if (!link || !link.ok) { U.toast((link && link.reason) || '报修已创建，但未能关联当前清扫'); return; }
@@ -14369,12 +14647,14 @@ App.act('rp-submit', function () {
 });
 
 App.act('rp-repair-continue', function () {
+  _rpSubmitting = false;
   App.closeSheet();
   U.toast('工程处理中；你可以继续清扫不受影响区域');
   App.go('hk-active');
 });
 
 App.act('rp-repair-pause', function () {
+  _rpSubmitting = false;
   var id = _rpRepairDecision.cleanId;
   var res = RoomSvc.cleanPause(id, 'waitRepair');
   DB.flush();
@@ -18346,7 +18626,21 @@ App.page('hk-inspect', {
     var u = DB.byId('users', me.id);
     if (!Policy.can(u, 'inspect')) return Comp.empty('你没有查房权限，请联系店长配置', '🔒');
     var R = RoomSvc;
-    var pool = R.inspectPool();
+    /* 查房页只消费显式 room_inspection 任务。
+     * 房间 inspStatus 是业务状态，不再作为“开始查房”的第二条入口。 */
+    var pool = DB.find('tasks', function (t) {
+      return AuthContext.inScope(t) && t.type === 'room_inspection'
+        && t.status === 'pending' && !t.assigneeId
+        && (t.poolCap ? Policy.can(me, t.poolCap) : t.poolDeptId === me.deptId);
+    }).sort(function (a, b) {
+      var pa = a.priority === 'urgent' ? 3 : (a.priority === 'high' ? 2 : 1);
+      var pb = b.priority === 'urgent' ? 3 : (b.priority === 'high' ? 2 : 1);
+      return pb - pa || (a.dueAt || 0) - (b.dueAt || 0);
+    });
+    var claimed = DB.find('tasks', function (t) {
+      return AuthContext.inScope(t) && t.type === 'room_inspection'
+        && t.status === 'pending' && t.assigneeId === me.id && !t.startedAt;
+    }).sort(function (a, b) { return (a.dueAt || 0) - (b.dueAt || 0); });
     var mine = DB.find('roomInsp', function (x) { return x.inspectorId === me.id && !x.endedAt; });
     var p = R.personToday(me.id);
     var html = '<div class="card mt12"><div class="kpi-grid c3">'
@@ -18354,6 +18648,19 @@ App.page('hk-inspect', {
       + '<div class="kpi"><div class="v">' + p.times + '</div><div class="k">今日已查</div></div>'
       + '<div class="kpi"><div class="v ' + (p.failed ? 'c-orange' : '') + '">' + p.failed + '</div><div class="k">问题房</div></div>'
       + '</div><div class="t-xs c3 mt12">待查房为共享池：谁先开始谁绑定，开始后其他人不能并发提交。</div></div>';
+
+    if (claimed.length) {
+      html += Comp.sectionTitle('我已接单 · 待到房');
+      html += '<div class="list">' + claimed.map(function (t) {
+        var room = DB.byId('rooms', t.roomId);
+        return '<div class="li" data-act="hk-insp-task-open" data-id="' + t.id + '">'
+          + '<div class="li-icon" style="background:#eaf1fd">📍</div>'
+          + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : DB.roomNo(t.roomId)) + ' 房 · '
+          + (t.inspectionKind === 'recheck' ? '复查' : '查房') + '</div>'
+          + '<div class="t-xs c3 mt8">已接单 · 待到房扫码，扫码后才开始计时</div></div>'
+          + '<div class="btn btn-primary btn-sm" data-act="hk-insp-task-open" data-id="' + t.id + '">去扫码</div></div>';
+      }).join('') + '</div>';
+    }
 
     if (mine.length) {
       html += Comp.sectionTitle('我进行中的查房');
@@ -18371,22 +18678,19 @@ App.page('hk-inspect', {
       }).join('') + '</div>';
     }
 
-    html += Comp.sectionTitle('共享池');
-    if (!pool.length) html += Comp.empty('暂无待查房', '✅');
-    else html += '<div class="list">' + pool.map(function (s) {
-      var locked = s.insp === 'inspecting';
-      return '<div class="li" data-act="open-room" data-id="' + s.room.id + '">'
-        + '<div class="li-icon" style="background:' + (s.insp === 'recheck' ? '#fdf1e5' : '#eaf1fd') + '">'
-        + (s.insp === 'recheck' ? '↩️' : '🔍') + '</div>'
-        + '<div class="grow"><div class="t-md t-w6">' + U.esc(s.room.number) + ' 房</div>'
-        + '<div class="t-xs c3 mt8">' + RoomSvc.inspName(s.insp) + ' · ' + U.esc(s.room.type || '')
-        + (s.priority !== 'normal' ? ' · <span class="chip chip-orange">' + RoomSvc.prioName(s.priority) + '</span>' : '') + '</div>'
-        + '<div class="t-xs c3 mt8">清扫人：' + U.esc(s.room.cleanerToday || '—') + '</div></div>'
-        + '<div class="row" style="gap:6px;flex:none">'
-        + (locked
-          ? '<span class="chip chip-blue">查房中</span>'
-          : '<div class="btn btn-primary btn-sm" data-act="hk-insp-start" data-id="' + s.room.id + '">开始查房</div>')
-        + '</div></div>';
+    html += Comp.sectionTitle('待接查房');
+    if (!pool.length) html += Comp.empty('暂无待接查房任务', '✅');
+    else html += '<div class="list">' + pool.map(function (t) {
+      var room = DB.byId('rooms', t.roomId);
+      var kindName = t.inspectionKind === 'recheck' ? '待复查' : '待查房';
+      return '<div class="li" data-act="hk-insp-task-open" data-id="' + t.id + '">'
+        + '<div class="li-icon" style="background:' + (t.inspectionKind === 'recheck' ? '#fdf1e5' : '#eaf1fd') + '">'
+        + (t.inspectionKind === 'recheck' ? '↩️' : '🔍') + '</div>'
+        + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : DB.roomNo(t.roomId)) + ' 房</div>'
+        + '<div class="t-xs c3 mt8">' + kindName + ' · ' + U.esc(room ? (room.type || '') : '')
+        + (t.priority !== 'normal' ? ' · <span class="chip chip-orange">' + U.esc(t.priority === 'urgent' ? '紧急' : '优先') + '</span>' : '') + '</div>'
+        + '<div class="t-xs c3 mt8">共享待接 · 有查房能力的人员均可认领</div></div>'
+        + '<div class="btn btn-primary btn-sm" data-act="hk-insp-task-open" data-id="' + t.id + '">查看/接单</div></div>';
     }).join('') + '</div>';
 
     if (p.list.length) {
@@ -18647,14 +18951,33 @@ App.act('hk-finish-special', function (el) {
 });
 
 /* ---------------- 查房动作 ---------------- */
+App.act('hk-insp-task-open', function (el) {
+  var taskId = el.getAttribute('data-id');
+  if (taskId) App.go('task/' + taskId);
+});
+
+/* 兼容旧按钮/旧缓存：任何“开始查房”入口都只允许跳回显式查房任务，
+ * 不允许直接调用 inspStart 绕过接单和扫码。 */
 App.act('hk-insp-start', function (el) {
   var roomId = el.getAttribute('data-id');
-  var st = RoomSvc.state(roomId);
-  var res = RoomSvc.inspStart(roomId, { kind: st && st.insp === 'recheck' ? 'recheck' : 'formal' });
-  DB.flush();
-  if (!res.ok) { U.toast(res.reason || '无法开始'); return; }
-  U.toast('已开始查房，房间已锁定'); App.refresh();
+  var task = DB.findOne('tasks', function (t) {
+    return AuthContext.inScope(t) && t.type === 'room_inspection' && t.roomId === roomId
+      && t.status !== 'done' && t.status !== 'closed';
+  });
+  if (!task) { U.toast('未找到查房任务，请刷新后重试'); return; }
+  App.go('task/' + task.id);
 });
+App.act('hk-insp-scan-ok', function (el) {
+  var roomId = el.getAttribute('data-id');
+  var me = Engine.Session.user();
+  var task = DB.findOne('tasks', function (t) {
+    return AuthContext.inScope(t) && t.type === 'room_inspection' && t.roomId === roomId
+      && t.assigneeId === me.id && t.status === 'pending';
+  });
+  if (!task) { U.toast('请先接下查房任务，再从任务详情扫码开始'); return; }
+  App.go('task/' + task.id);
+});
+
 App.act('hk-insp-pass', function (el) {
   var res = RoomSvc.inspFinish(el.getAttribute('data-id'), 'pass', {});
   DB.flush();
@@ -18671,12 +18994,21 @@ App.act('hk-insp-fail', function (el) {
         return '<span class="chip chip-line" data-act="hk-issue-pick" data-c="' + c + '" style="margin:0 6px 6px 0;cursor:pointer">' + U.esc(c) + '</span>';
       }).join('') + '</div>'
       + '<textarea class="inp mt12" id="hk-issue-note" placeholder="问题描述" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:70px"></textarea>'
+      + Comp.photoPicker('hk-issue-photo', 'hk-issue-photo-count', 0, '问题照片（可上传/拍照）')
       + '<div class="t-xs c3 mt8">已选：<span id="hk-issue-sel">（未选择）</span></div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="hk-insp-fail-go" data-id="' + id + '">提交并生成整改</button>'
   });
-  window.__hkIssues = [];
+  window.__hkIssues = []; window.__hkIssuePhotos = [];
 });
+function hkIssueAddPhoto(source) {
+  window.__hkIssuePhotos = window.__hkIssuePhotos || [];
+  window.__hkIssuePhotos.push(source);
+  var n = document.getElementById('hk-issue-photo-count'); if (n) n.textContent = window.__hkIssuePhotos.length;
+  U.toast(source === 'upload' ? '已上传照片（验收版模拟）' : '已拍照（验收版模拟）');
+}
+App.act('hk-issue-photo-upload', function () { hkIssueAddPhoto('upload'); });
+App.act('hk-issue-photo-camera', function () { hkIssueAddPhoto('camera'); });
 App.act('hk-issue-pick', function (el) {
   var c = el.getAttribute('data-c');
   window.__hkIssues = window.__hkIssues || [];
@@ -18689,10 +19021,12 @@ App.act('hk-insp-fail-go', function (el) {
   var cats = window.__hkIssues || [];
   if (!cats.length) { U.toast('请至少选择一个问题类别'); return; }
   var note = (document.getElementById('hk-issue-note') || {}).value || '';
+  var photos = (window.__hkIssuePhotos || []).map(function (source, i) { return 'inspection_' + source + '_' + Date.now() + '_' + i; });
   var res = RoomSvc.inspFinish(el.getAttribute('data-id'), 'fail', {
-    issues: cats.map(function (c) { return { cat: c, note: note }; })
+    issues: cats.map(function (c) { return { cat: c, note: note, photos: photos }; }),
+    photos: photos
   });
-  DB.flush(); App.closeSheet(); window.__hkIssues = [];
+  DB.flush(); App.closeSheet(); window.__hkIssues = []; window.__hkIssuePhotos = [];
   U.toast(res.ok ? '已生成整改事项' : (res.reason || '提交失败'));
   App.refresh();
 });App.act('hk-rectify-done', function (el) {
