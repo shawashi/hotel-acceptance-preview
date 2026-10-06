@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 17:52 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:21 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -3571,12 +3571,38 @@ window.RoomSvc = (function () {
       if (linkedIssues.length && !stillOpenInspectionIssues.length) {
         var parentInspId = linkedIssues[0].inspId || '';
         DB.update('rooms', roomId, { inspStatus: 'recheck' });
-        ensureInspectionTask(roomId, 'recheck', parentInspId);
-        Policy.whoHas('inspect').filter(function (u) { return AuthContext.inScope(u); }).forEach(function (u) {
-          Engine.notify(u.id, { type: 'task', title: DB.roomNo(roomId) + ' 房待复查',
-            content: '工程维修已完成，请复查确认', refType: 'room', refId: roomId });
-        });
-        tl(roomId, 'rectify', '工程维修完成，查房设备问题已整改，等待复查', { refType: 'workorder', refId: workOrderId || '' });
+        /* 原查房人应从自己原来的查房事项继续复查，而不是再生成一条共享待接任务。
+         * 这样首页只有一个 803 入口，责任链也保持连续。 */
+        var parentInsp = parentInspId ? DB.byId('roomInsp', parentInspId) : null;
+        var parentTask = parentInsp && parentInsp.taskId ? DB.byId('tasks', parentInsp.taskId) : null;
+        var recheckTask = null;
+        if (parentTask && parentTask.type === 'room_inspection' && parentTask.status === 'waitcheck') {
+          var recheckerId = parentInsp.inspectorId || parentTask.assigneeId || '';
+          DB.update('tasks', parentTask.id, {
+            status: 'pending',
+            title: DB.roomNo(roomId) + ' 房待复查',
+            source: '整改完成',
+            inspectionKind: 'recheck',
+            parentInspId: parentInspId,
+            assigneeId: recheckerId,
+            claimBy: recheckerId,
+            claimAt: now,
+            startedAt: 0,
+            roomScanAt: 0,
+            completedAt: 0,
+            dueAt: now + 30 * 60000,
+            result: '工程维修已完成，待复查'
+          });
+          Engine.Task.addStep(parentTask.id, '工程维修完成，原查房任务转待复查，继续由原查房人负责');
+          recheckTask = DB.byId('tasks', parentTask.id);
+          if (recheckerId) {
+            Engine.notify(recheckerId, { type: 'task', title: DB.roomNo(roomId) + ' 房待复查',
+              content: '工程维修已完成，请回房扫码复查确认', refType: 'task', refId: parentTask.id });
+          }
+        } else {
+          recheckTask = ensureInspectionTask(roomId, 'recheck', parentInspId);
+        }
+        tl(roomId, 'rectify', '工程维修完成，查房设备问题已整改，等待复查', { refType: 'task', refId: recheckTask ? recheckTask.id : '' });
       }
     }
 
@@ -21812,6 +21838,45 @@ window.AcceptanceTest = {
 };
 
 function acceptanceBoot() {
+  /* 兼容已经走到“工程完成→待复查”断点的旧验收数据：
+   * 旧版会保留原 waitcheck 查房任务，同时另建一条共享 recheck，导致首页重复且原入口不可操作。
+   * 新版自动把原查房任务恢复为原查房人的待复查入口，并关闭重复共享任务，不要求重置重做。 */
+  DB.find('tasks', function (t) {
+    return t.type === 'room_inspection' && t.status === 'waitcheck' && !!t.assigneeId;
+  }).forEach(function (parentTask) {
+    var room = DB.byId('rooms', parentTask.roomId);
+    if (!room || room.inspStatus !== 'recheck') return;
+    var parentInsp = DB.find('roomInsp', function (x) {
+      return x.taskId === parentTask.id && x.result === 'fail';
+    }).sort(function (a, b) { return b.endedAt - a.endedAt; })[0] || null;
+    if (!parentInsp) return;
+    var duplicate = DB.findOne('tasks', function (t) {
+      return t.id !== parentTask.id && t.type === 'room_inspection' && t.roomId === parentTask.roomId
+        && t.inspectionKind === 'recheck' && t.status === 'pending';
+    });
+    if (!duplicate) return;
+    var now = Date.now();
+    DB.update('tasks', parentTask.id, {
+      status: 'pending',
+      title: DB.roomNo(parentTask.roomId) + ' 房待复查',
+      source: '整改完成',
+      inspectionKind: 'recheck',
+      parentInspId: parentInsp.id,
+      claimBy: parentTask.assigneeId,
+      claimAt: now,
+      startedAt: 0,
+      roomScanAt: 0,
+      completedAt: 0,
+      dueAt: now + 30 * 60000,
+      result: '工程维修已完成，待复查'
+    });
+    Engine.Task.addStep(parentTask.id, '验收数据升级：工程已完成，原查房任务恢复为待复查入口');
+    DB.update('tasks', duplicate.id, {
+      status: 'closed', completedAt: now,
+      result: '已合并到原查房人的复查任务'
+    });
+  });
+
   /* 验收版基线：seed 自带演示待办不能混入人工验收。
    * 只归档明确的 seed ID；人工验收现场产生的真实链路不受影响。 */
   DB.find('tasks', function (t) {
