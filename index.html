@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 00:55 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 03:41 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -13328,6 +13328,8 @@ function homeInvestor(me) {
     + enterBox('org-gm-change', '店长任免', '👑', '#faf4e9', 0)
     + enterBox('open-incident', '经营异常', '⚠️', '#fdecec', inc.length)
     + enterBox('go-stats', '核心数据', '📊', '#eaf1fd', 0)
+    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
+    + (Policy.businessEnabled('restaurant', me.hotelId) && TeamMeal.canArrange(me) ? enterBox('tm-new', '团餐发起', '🍱', '#faf4e9', 0) : '')
     + enterBox('go-dev', '系统方审批', '🛠️', '#f1f3f6', devPending)
     + '</div>'
     + '<div class="t-xs c3 mt12">日常人员配置（新增/审核/停用普通员工、部门、岗位、权限）由店长负责。</div></div>';
@@ -13586,15 +13588,20 @@ function staffEntries(u) {
   var ops = [];
   function add(k, n, i, bg) { if (!ops.some(function (x) { return x.k === k; })) ops.push({ k: k, n: n, i: i, bg: bg }); }
 
-  /* 销售岗位先收敛：只保留四个默认高频入口；额外能力只加对应入口。 */
+  /* 员工餐申报属于全员个人功能，不依赖部门岗位；只要门店启用就优先显示。 */
+  if (Policy.businessEnabled('staff_meal', u.hotelId)) add('go-meal', '员工餐申报', '🍚', '#faf4e9');
+
+  /* 销售岗位继续收敛：部门业务只保留高频事项；个人员工餐独立保留。 */
   if (Policy.businessEnabled('sales', u.hotelId) && Policy.can(u, 'sales')) {
     add('sl-new', '客房预订', '🛏', '#faf4e9');
     if (Policy.businessEnabled('meeting', u.hotelId)) add('mt-reserve-new', '会议室预订', '📅', '#eaf1fd');
-    if (Policy.businessEnabled('staff_meal', u.hotelId)) add('go-meal', '员工餐', '🍚', '#faf4e9');
-    if (Policy.businessEnabled('restaurant', u.hotelId) && Policy.can(u, 'arrange_team_meal')) add('tm-new', '团餐发起', '🍱', '#faf4e9');
+    if (Policy.businessEnabled('restaurant', u.hotelId) && TeamMeal.canArrange(u)) add('tm-new', '团餐发起', '🍱', '#faf4e9');
     if (Policy.businessEnabled('housekeeping', u.hotelId) && Policy.can(u, 'inspect')) add('go-hk-inspect', '客房查房', '🔍', '#eaf1fd');
     return ops.slice(0, 6);
   }
+
+  if (Policy.businessEnabled('restaurant', u.hotelId) && TeamMeal.canArrange(u)) add('tm-new', '团餐发起', '🍱', '#faf4e9');
+  if (Policy.businessEnabled('restaurant', u.hotelId) && (TeamMeal.canExecute(u) || TeamMeal.canAcknowledge(u) || TeamMeal.canClose(u))) add('go-team-meals', '团餐管理', '🍱', '#e7f6ef');
 
   if (Policy.businessEnabled('housekeeping', u.hotelId) && Policy.can(u, 'clean')) add('go-hk', '客房作业', '🧹', '#f0ecfd');
   if (Policy.businessEnabled('housekeeping', u.hotelId) && Policy.can(u, 'inspect')) add('go-hk-inspect', '查房', '🔍', '#eaf1fd');
@@ -13612,8 +13619,6 @@ function staffEntries(u) {
   /* 餐饮岗位不再放“餐饮工作台”；具体早餐/团餐从“我的工作”或消息直达。 */
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'purchase_food')) add('go-food-apply', '食材申购', '🥬', '#e7f6ef');
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'accept_food')) add('go-purchase', '食材验收', '📦', '#faf4e9');
-  if (Policy.businessEnabled('staff_meal', u.hotelId) && !Policy.can(u, 'frontdesk')) add('go-meal', '员工餐', '🍚', '#faf4e9');
-
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'purchase_eng')) add('go-apply', '维修物资', '🔧', '#f1f3f6');
   if (Policy.can(u, 'dispatch_housekeeping')) add('go-guest-internal', '客房临时任务', '🧺', '#f0ecfd');
   if (Policy.can(u, 'manage_recurring_task')) add('go-recurring', '周期任务', '🔁', '#eaf1fd');
@@ -13673,6 +13678,7 @@ function homeManager(me) {
   html += '<div class="card"><div class="card-head"><div class="card-title">快捷处理</div></div><div class="enter-grid">'
     + (isHK ? enterBox('go-hk-work', '客房作业', '🧹', '#fdf1e5', 0) : '')
     + (isHK ? enterBox('go-hk-inspect', '查房', '🔍', '#eaf1fd', inspectionPoolTasks(me).length + inspectionMineTasks(me).length) : '')
+    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
     + enterBox('open-incident', '异常', '⚠️', '#fdecec', inc.length)
     + enterBox('tab', '任务', '📋', '#eaf1fd', 0)
     + enterBox('go-stats', '数据', '📊', '#f1f3f6', 0)
@@ -13855,6 +13861,11 @@ function homeGM(me) {
     + kpiBox2(Engine.Stats.overview(Engine.Stats.range('30')).overtimeRate + '%', '30天超时率')
     + '</div></div>';
 
+  html += '<div class="card"><div class="card-head"><div class="card-title">个人与业务</div></div><div class="enter-grid">'
+    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
+    + (Policy.businessEnabled('restaurant', me.hotelId) && TeamMeal.canArrange(me) ? enterBox('tm-new', '团餐发起', '🍱', '#faf4e9', 0) : '')
+    + '</div></div>';
+
   html += '<div class="card card-tight"><div class="row-b" data-act="gm-manage">'
     + '<div><div class="t-md t-w6">管理与配置</div>'
     + '<div class="t-xs c3 mt8">人员、空间、供应商、周期任务、成本等低频设置</div></div>'
@@ -13922,6 +13933,7 @@ function homeFinance(me) {
     + enterBox('go-purchase', '采购台账', '🛒', '#e7f6ef', 0)
     + enterBox('go-inventory', '库存', '📦', '#fdf1e5', low.length)
     + enterBox('tab', '数据统计', '📊', '#eaf1fd', 0)
+    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
     + '</div></div>';
   return html;
 }
@@ -13973,6 +13985,7 @@ function homePurchase(me) {
     + enterBox('go-supplier', '供应商档案', '🏷️', '#eaf1fd', 0)
     + enterBox('go-inventory', '库存台账', '📦', '#e7f6ef', 0)
     + enterBox('tab', '数据统计', '📊', '#f1f3f6', 0)
+    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
     + '</div></div>';
   return html;
 }
@@ -20634,6 +20647,48 @@ App.page('bf-history', {
     return html;
   }
 });
+
+App.page('team-meals', {
+  title: '团餐管理',
+  render: function () {
+    var me = Engine.Session.user();
+    if (!Policy.businessEnabled('restaurant', me.hotelId)) {
+      return '<div class="card mt12"><div class="card-title">当前门店未启用餐厅业务</div><div class="t-xs c3 mt8">历史团餐仍保留，但不再新增。</div></div>';
+    }
+    if (!(TeamMeal.canExecute(me) || TeamMeal.canAcknowledge(me) || TeamMeal.canClose(me) || TeamMeal.canArrange(me))) {
+      return Comp.empty('你没有团餐查看或处理权限', '🔒');
+    }
+    var list = TeamMeal.list({ from: U.ymd(Date.now() - 7 * 86400000) })
+      .sort(function (a,b) { return a.date === b.date ? (b.createdAt||0)-(a.createdAt||0) : (a.date < b.date ? 1 : -1); });
+    var open = list.filter(function (m) { return m.status !== 'done' && m.status !== 'canceled'; });
+    var done = list.filter(function (m) { return m.status === 'done'; }).slice(0, 12);
+    var html = '<div class="card mt12"><div class="row-b"><div><div class="card-title">团餐事项</div>'
+      + '<div class="t-xs c3 mt8">待执行 ' + open.length + ' 项 · 近期已完成 ' + done.length + ' 项</div></div>'
+      + (TeamMeal.canArrange(me) ? '<div class="btn btn-primary btn-sm" data-act="tm-new">+ 发起团餐</div>' : '') + '</div></div>';
+    html += '<div class="sec-title">待执行</div><div class="list">'
+      + (open.length ? open.map(function (m) {
+        var action = '';
+        if (m.status === 'received' && TeamMeal.canAcknowledge(me)) action = '<span class="chip chip-orange">待确认</span>';
+        else if (['confirmed','preparing','ready'].indexOf(m.status) >= 0 && TeamMeal.canClose(me)) action = '<span class="chip chip-blue">待收尾</span>';
+        else action = '<span class="chip chip-' + TeamMeal.stCls(m.status) + '">' + TeamMeal.stName(m.status) + '</span>';
+        return '<div class="li" data-act="team-meal-open" data-id="' + m.id + '">'
+          + '<div class="li-icon" style="background:#faf4e9">🍱</div><div class="grow">'
+          + '<div class="row-b"><div class="t-md t-w6">' + U.esc(m.team || m.event || m.code) + '</div>' + action + '</div>'
+          + '<div class="t-xs c3 mt8">' + U.esc(m.date) + ' ' + U.esc(m.slot || '') + (m.time ? ' ' + U.esc(m.time) : '') + ' · 预计 ' + (m.peopleCount || 0) + ' 人</div>'
+          + '</div><div class="li-arrow">›</div></div>';
+      }).join('') : Comp.empty('暂无待执行团餐', '✅')) + '</div>';
+    if (done.length) {
+      html += '<div class="sec-title">近期已完成</div><div class="list">' + done.map(function (m) {
+        return '<div class="li" data-act="team-meal-open" data-id="' + m.id + '"><div class="grow"><div class="t-md">' + U.esc(m.team || m.event || m.code) + '</div>'
+          + '<div class="t-xs c3 mt8">' + U.esc(m.date) + ' · 预计 ' + (m.peopleCount||0) + ' / 实际 ' + (m.actualCount||0) + ' 人</div></div><div class="li-arrow">›</div></div>';
+      }).join('') + '</div>';
+    }
+    return html;
+  }
+});
+
+App.act('go-team-meals', function () { App.go('team-meals'); });
+App.act('team-meal-open', function (el) { App.go('team-meal/' + el.getAttribute('data-id')); });
 
 App.page('team-meal', {
   title: '团餐详情',
