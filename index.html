@@ -3028,7 +3028,7 @@ window.Pool = (function () {
     if (t.claimBy) return { ok: false, reason: DB.userName(t.claimBy) + ' 正在处理', by: t.claimBy };
     var u = DB.byId('users', userId);
     if (t.poolCap && !Policy.can(u, t.poolCap)) return { ok: false, reason: '你没有接手该任务的业务权限' };
-    var roomHousekeeping = t.type === 'housekeeping' && !!t.roomId;
+    var roomHousekeeping = (t.type === 'housekeeping' || t.type === 'room_inspection') && !!t.roomId;
     DB.update('tasks', taskId, {
       claimBy: userId, claimAt: Date.now(), assigneeId: userId,
       status: roomHousekeeping ? 'pending' : 'doing', lockVer: (t.lockVer || 0) + 1,
@@ -3036,9 +3036,9 @@ window.Pool = (function () {
       snapDoer: roomHousekeeping ? (t.snapDoer || null) : Engine.Snapshot.of(userId)
     });
     Engine.Task.addStep(taskId, roomHousekeeping
-      ? DB.userName(userId) + ' 已接单，待到房扫码开始清扫'
+      ? DB.userName(userId) + (t.type === 'room_inspection' ? ' 已接单，待到房扫码开始查房' : ' 已接单，待到房扫码开始清扫')
       : DB.userName(userId) + ' 接手处理');
-    Engine.log && Engine.log(roomHousekeeping ? '接手客房任务待到房' : '接手池任务', t.code);
+    Engine.log && Engine.log(roomHousekeeping ? (t.type === 'room_inspection' ? '接手查房任务待到房' : '接手客房任务待到房') : '接手池任务', t.code);
     return { ok: true, task: DB.byId('tasks', taskId) };
   }
 
@@ -3776,6 +3776,7 @@ window.RoomSvc = (function () {
     }
 
     DB.update('roomInsp', inspId, {
+      /* 查房合格才真正结束；发现问题后原查房责任仍保留到整改/复查闭环。 */
       endedAt: now, duration: dur, result: result,
       issueCount: issues.length, note: o.note || '', photos: o.photos || []
     });
@@ -3783,10 +3784,13 @@ window.RoomSvc = (function () {
       var inspectTask = DB.byId('tasks', ins.taskId);
       if (inspectTask && inspectTask.status !== 'done' && inspectTask.status !== 'closed') {
         DB.update('tasks', ins.taskId, {
-          status: 'done', completedAt: now, result: result === 'pass' ? '查房合格' : ('查房发现 ' + issues.length + ' 项问题'),
-          assigneeId: me.id, snapDone: Engine.Snapshot.of(me.id)
+          status: result === 'pass' ? 'done' : 'doing',
+          completedAt: result === 'pass' ? now : 0,
+          result: result === 'pass' ? '查房合格' : ('查房发现 ' + issues.length + ' 项问题，等待整改/复查'),
+          assigneeId: me.id,
+          snapDone: result === 'pass' ? Engine.Snapshot.of(me.id) : (inspectTask.snapDone || null)
         });
-        Engine.Task.addStep(ins.taskId, result === 'pass' ? '查房合格，任务完成' : '查房完成，已生成整改事项');
+        Engine.Task.addStep(ins.taskId, result === 'pass' ? '查房合格，任务完成' : '查房发现问题，原查房任务保留，等待整改/复查闭环');
       }
     }
 
@@ -3888,7 +3892,7 @@ window.RoomSvc = (function () {
     }
     DB.update('rooms', ins.roomId, { inspStatus: 'rectify' });
     tl(ins.roomId, 'inspect', me.name + ' 查房发现 ' + issues.length + ' 项问题，已生成整改事项', { refType: 'roomInsp', refId: inspId });
-    Engine.notify(fixTo, { type: 'task', title: r.number + ' 房查房问题需整改', content: ins.inspector + ' 查房发现 ' + issues.length + ' 项问题', refType: 'roomInsp', refId: inspId });
+    if (fixTo) Engine.notify(fixTo, { type: 'task', title: r.number + ' 房查房问题需整改', content: ins.inspector + ' 查房发现 ' + issues.length + ' 项问题', refType: 'roomInsp', refId: inspId });
     Engine.log && Engine.log('查房发现问题', r.number);
     return { ok: true, insp: DB.byId('roomInsp', inspId), issueCount: issues.length };
   }
