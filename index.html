@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:50 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 20:19 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -4786,13 +4786,14 @@ window.TeamMeal = (function () {
 
   /**
    * 谁能安排团餐（V4.2.1 §13）
-   * 投资人 / 店长默认可以；销售是否开放由门店配置 teamMealOpenToSales 决定。
+   * 当前单店验收阶段：前厅可直接发起；投资人 / 店长仍可安排；销售按门店配置开放。
    * 不写死任何人名或岗位。
    */
   function canArrange(u) {
     u = u || Engine.Session.me;
     if (!u) return false;
     if (Policy.can(u, 'arrange_team_meal')) return true;   // 显式能力优先
+    if (Policy.can(u, 'frontdesk')) return true;            // 当前阶段前厅可直接发起团餐
     if (Engine.Guard && Engine.Guard.isInvestor(u)) return true;
     if (Engine.Guard && Engine.Guard.isCurrentGM && Engine.Guard.isCurrentGM(u.id)) return true;
     if (Policy.can(u, 'manage_org')) return true;
@@ -13481,14 +13482,16 @@ function staffEntries(u) {
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'maintain')) {
     add('go-mywo', '工程工单', '🛠️', '#fdf1e5');
   }
-  /* 前厅：客房作业发起、销售预订待确认、住客早餐、今日会议、客诉 */
+  /* 前厅：只保留高频现场入口；会议底层能力保留但不常驻首页 */
   if (Policy.can(u, 'frontdesk')) {
     add('hk-batch', '发起客房作业', '🧹', '#f0ecfd');
     add('go-room-swap', '换房处理', '🔄', '#eaf1fd');
     add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
     if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-catering', '住客早餐', '🥐', '#e7f6ef');
-    add('go-meeting', '今日会议', '📅', '#eaf1fd');
     add('go-complaint', '客诉受理', '🙋', '#fdecec');
+    if (Policy.businessEnabled('restaurant', u.hotelId)) add('tm-new', '团餐申报', '🍱', '#faf4e9');
+    if (Policy.businessEnabled('staff_meal', u.hotelId)) add('go-meal', '员工餐', '🍚', '#faf4e9');
+    add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
   /* 销售：新建客房预订、会议室预订 */
   if (Policy.can(u, 'sales')) {
@@ -13543,7 +13546,7 @@ function staffEntries(u) {
     if (seen[o.k]) return;
     seen[o.k] = 1; out.push(o);
   });
-  return out.slice(0, Policy.isSupervisor(u) ? 12 : 8);
+  return out.slice(0, Policy.isSupervisor(u) ? 12 : (Policy.can(u, 'frontdesk') ? 9 : 8));
 }
 
 /* ==========================================================================
@@ -20420,34 +20423,44 @@ App.act('bf-forecast', function () {
   App.sheet({
     title: '预计早餐人数',
     body: '<div class="pad" style="padding:8px 18px">'
-      + '<div class="field"><div class="field-label">日期</div><input class="inp" id="bf-date" type="date" value="' + U.ymd(Date.now() + 86400000) + '" style="text-align:left"></div>'
-      + '<div class="row-b mt12"><div class="t-md">预计人数</div>'
-      + '<div class="num-step"><button data-act="bf-minus">−</button><div class="n" id="bf-n" style="font-size:20px">' + (d.finalForecast || d.firstForecast || 0) + '</div><button data-act="bf-plus">＋</button></div></div>'
-      + '<div class="row-b mt12"><div class="t-md">其中成人</div>'
-      + '<div class="num-step"><button data-act="bf-a-minus">−</button><div class="n" id="bf-a" style="font-size:18px">' + ((d.detail || {}).adults || 0) + '</div><button data-act="bf-a-plus">＋</button></div></div>'
-      + '<div class="row-b mt12"><div class="t-md">其中儿童</div>'
-      + '<div class="num-step"><button data-act="bf-c-minus">−</button><div class="n" id="bf-c" style="font-size:18px">' + ((d.detail || {}).children || 0) + '</div><button data-act="bf-c-plus">＋</button></div></div>'
-      + '<textarea class="inp mt12" id="bf-reason" placeholder="修订原因（选填，如：团队临时增加 12 人）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>'
+      + '<div class="t-xs c3">填写成人和儿童人数，总人数自动相加；业务日期与录入时间由系统后台记录。</div>'
+      + '<div class="row-b mt12"><div class="t-md">成人</div>'
+      + '<div class="num-step"><button data-act="bf-a-minus">−</button><input class="inp n" id="bf-a" type="number" min="0" max="999" inputmode="numeric" value="' + ((d.detail || {}).adults || 0) + '" style="width:76px;text-align:center;font-size:18px;padding:6px"><button data-act="bf-a-plus">＋</button></div></div>'
+      + '<div class="row-b mt12"><div class="t-md">儿童</div>'
+      + '<div class="num-step"><button data-act="bf-c-minus">−</button><input class="inp n" id="bf-c" type="number" min="0" max="999" inputmode="numeric" value="' + ((d.detail || {}).children || 0) + '" style="width:76px;text-align:center;font-size:18px;padding:6px"><button data-act="bf-c-plus">＋</button></div></div>'
+      + '<div class="row-b mt12"><div class="t-md t-w6">预计总人数</div><div class="t-xl t-w6"><span id="bf-total">' + (((d.detail || {}).adults || 0) + ((d.detail || {}).children || 0)) + '</span> 人</div></div>'
+      + (d.firstAt ? '<textarea class="inp mt12" id="bf-reason" placeholder="修订原因（选填，如：团队临时增加 12 人）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>' : '<input type="hidden" id="bf-reason" value="">')
       + '<div class="t-xs c3 mt12">每一次修订都会单独留痕，历史不会被覆盖。</div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="bf-forecast-save">保存</button>'
   });
 });
-App.act('bf-plus', function () { var n = document.getElementById('bf-n'); n.textContent = Math.min(999, (+n.textContent || 0) + 1); });
-App.act('bf-minus', function () { var n = document.getElementById('bf-n'); n.textContent = Math.max(0, (+n.textContent || 0) - 1); });
-App.act('bf-a-plus', function () { var n = document.getElementById('bf-a'); n.textContent = Math.min(999, (+n.textContent || 0) + 1); });
-App.act('bf-a-minus', function () { var n = document.getElementById('bf-a'); n.textContent = Math.max(0, (+n.textContent || 0) - 1); });
-App.act('bf-c-plus', function () { var n = document.getElementById('bf-c'); n.textContent = Math.min(999, (+n.textContent || 0) + 1); });
-App.act('bf-c-minus', function () { var n = document.getElementById('bf-c'); n.textContent = Math.max(0, (+n.textContent || 0) - 1); });
+function bfInputNum(id) {
+  var el = document.getElementById(id), v = Math.max(0, Math.min(999, +(el && el.value) || 0));
+  if (el) el.value = v;
+  return v;
+}
+function bfSyncTotal() {
+  var total = bfInputNum('bf-a') + bfInputNum('bf-c'), el = document.getElementById('bf-total');
+  if (el) el.textContent = total;
+  return total;
+}
+function bfStep(id, delta) {
+  var el = document.getElementById(id); if (!el) return;
+  el.value = Math.max(0, Math.min(999, (+el.value || 0) + delta)); bfSyncTotal();
+}
+App.act('bf-a-plus', function () { bfStep('bf-a', 1); });
+App.act('bf-a-minus', function () { bfStep('bf-a', -1); });
+App.act('bf-c-plus', function () { bfStep('bf-c', 1); });
+App.act('bf-c-minus', function () { bfStep('bf-c', -1); });
+document.addEventListener('input', function (e) { if (e.target && (e.target.id === 'bf-a' || e.target.id === 'bf-c')) bfSyncTotal(); });
 App.act('bf-forecast-save', function () {
-  var n = +((document.getElementById('bf-n') || {}).textContent || 0);
+  var adults = bfInputNum('bf-a'), children = bfInputNum('bf-c');
+  var n = adults + children;
   var res = Breakfast.forecast(n, {
-    date: (document.getElementById('bf-date') || {}).value || U.ymd(Date.now() + 86400000),
+    date: U.ymd(Date.now() + 86400000),
     reason: (document.getElementById('bf-reason') || {}).value || '',
-    detail: {
-      adults: +((document.getElementById('bf-a') || {}).textContent || 0),
-      children: +((document.getElementById('bf-c') || {}).textContent || 0)
-    }
+    detail: { adults: adults, children: children }
   });
   DB.flush(); App.closeSheet();
   U.toast(res && res.ok !== false ? '已保存预计人数' : ((res && res.reason) || '保存失败'));
@@ -20535,7 +20548,7 @@ App.act('tm-new', function () {
       + '<div class="num-step"><button data-act="tm-minus">−</button><div class="n" id="tm-n" style="font-size:20px">20</div><button data-act="tm-plus">＋</button></div></div>'
       + '<div class="field mt12"><div class="field-label">餐标 / 价格（选填）</div><input class="inp" id="tm-price" placeholder="如：50 元/人" style="text-align:left"></div>'
       + '<textarea class="inp mt12" id="tm-req" placeholder="特殊要求（选填），如：2 位素食" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>'
-      + '<div class="t-xs c3 mt12">团餐默认由投资人/店主或店长安排；是否开放给销售负责人可在策略中配置，不写死。</div></div>',
+      + '<div class="t-xs c3 mt12">当前阶段前厅可直接发起团餐；餐厅收到后按独立团餐对象执行，与住客早餐、员工餐分开统计。</div></div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="tm-save">安排</button>'
   });
