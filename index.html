@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:31 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-06 18:50 · 手机启动+查房工程联动修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -21949,6 +21949,7 @@ function acceptanceBoot() {
     + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button id="acceptance-reset" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">重置验收数据</button>'
     + '<button id="acceptance-pms-checkout" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">模拟 PMS 退房</button>'
     + '<button id="acceptance-inspection-eng" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试查房→工程</button>'
+    + '<button id="acceptance-reclean" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试维修后复洁</button>'
     + '<label>测试身份 <select id="acceptance-role">'
     + AcceptanceTest.accounts.map(function (a) {
       return '<option value="' + a.id + '">' + U.esc(a.label) + '</option>';
@@ -21958,6 +21959,7 @@ function acceptanceBoot() {
   var resetBtn = document.getElementById('acceptance-reset');
   var pmsCheckoutBtn = document.getElementById('acceptance-pms-checkout');
   var inspectionEngBtn = document.getElementById('acceptance-inspection-eng');
+  var recleanBtn = document.getElementById('acceptance-reclean');
   var resetUser = '';
   try { resetUser = sessionStorage.getItem('hotel_acceptance_reset_user') || ''; sessionStorage.removeItem('hotel_acceptance_reset_user'); } catch (e) {}
   if (resetUser && DB.byId('users', resetUser)) {
@@ -22030,6 +22032,71 @@ function acceptanceBoot() {
     App.go(t && t.id ? ('task/' + t.id) : 'home'); App.refresh();
     U.toast(roomNo + ' 房待查房测试已生成；当前已切换赵桂芳');
   });
+  recleanBtn.addEventListener('click', function () {
+    var roomNo = window.prompt('生成“维修完成后需要复洁”测试房号：', '806');
+    if (roomNo === null) return;
+    roomNo = String(roomNo || '').trim();
+    var room = DB.findOne('rooms', function (r) { return r.active !== 0 && String(r.number) === roomNo; });
+    if (!room) { U.toast('未找到 ' + roomNo + ' 房'); return; }
+
+    /* 清理该房未完成现场，仅重建本次验收场景。 */
+    DB.find('tasks', function (t) {
+      return t.roomId === room.id && ['housekeeping','room_inspection','repair','rectify'].indexOf(t.type) >= 0
+        && ['done','closed','canceled'].indexOf(t.status) < 0;
+    }).forEach(function (t) { DB.update('tasks', t.id, { status: 'canceled', completedAt: Date.now(), result: '验收复洁场景重建' }); });
+    DB.find('workOrders', function (w) {
+      return w.roomId === room.id && w.status !== 'done';
+    }).forEach(function (w) { DB.update('workOrders', w.id, { status: 'done', finishAt: Date.now(), result: '验收复洁场景重建' }); });
+    DB.find('roomClean', function (x) { return x.roomId === room.id && !x.endedAt; })
+      .forEach(function (x) { DB.update('roomClean', x.id, { endedAt: Date.now(), result: 'canceled', resultName: '验收复洁场景重建' }); });
+    DB.find('roomInsp', function (x) { return x.roomId === room.id && !x.endedAt; })
+      .forEach(function (x) { DB.update('roomInsp', x.id, { endedAt: Date.now(), result: 'canceled', note: '验收复洁场景重建' }); });
+
+    var now = Date.now();
+    /* 模拟“原客房清扫已经完成”，这样工程完成页必须询问是否需要维修后复洁。 */
+    var clean = DB.insert('roomClean', AuthContext.stamp({
+      id: U.uid('rc'), roomId: room.id, date: U.ymd(),
+      cleanerId: 'u_6', cleaner: DB.userName('u_6'), assistantIds: [],
+      type: 'checkout', typeName: '退房清扫', piece: 1, needInspect: 1,
+      startedAt: now - 25 * 60000, endedAt: now - 5 * 60000, duration: 20,
+      pausedMs: 0, pausedAt: 0, workloadSnapshot: room.workload || 1,
+      roomTypeSnapshot: room.type || '', result: 'normal', resultName: '清扫完成',
+      resultNote: '人工验收：原清扫已完成', photos: [], followTaskId: '', taskId: ''
+    }));
+    DB.update('rooms', room.id, {
+      hkStatus: 'cleaned', cleanStatus: 'clean', inspStatus: '',
+      blockStatus: 'maintenance', lastCleanAt: clean.endedAt
+    });
+
+    var task = Engine.Task.create({
+      type: 'repair', businessCapability: 'maintenance', source: '验收测试：清扫后工程维修',
+      title: roomNo + ' 房维修后可能需要复洁', deptId: 'd_eng',
+      roomId: room.id, location: roomNo + ' 房',
+      desc: '人工验收：原清扫已结束，维修后可能产生灰尘/积水，需要判断是否复洁',
+      creatorId: 'u_6', assigneeId: 'u_9', dueMin: 30, priority: 'high'
+    });
+    var wo = Engine.WorkOrder.create({
+      taskId: task.id, category: '设备', issueTypeName: '维修后现场清洁验证',
+      title: task.title, roomId: room.id, location: roomNo + ' 房',
+      source: task.source, creatorId: 'u_6', assigneeId: 'u_9', deptId: 'd_eng',
+      dueMin: 30, priority: 'high', desc: task.desc, poolTask: false
+    });
+    DB.update('tasks', task.id, {
+      woId: wo.id, status: 'doing', assigneeId: 'u_9', claimBy: 'u_9',
+      claimAt: now - 8 * 60000, startedAt: now - 6 * 60000
+    });
+    DB.update('workOrders', wo.id, {
+      status: 'doing', assigneeId: 'u_9',
+      respondAt: now - 8 * 60000, arriveAt: now - 7 * 60000, startAt: now - 6 * 60000,
+      roomScanVerifiedAt: now - 7 * 60000, roomScanVerifiedBy: 'u_9', roomScanVerifiedId: room.id
+    });
+    DB.flush();
+
+    Engine.Session.set('u_9'); Engine.boot(); select.value = 'u_9'; syncAcceptanceControls();
+    App.go('wo/' + wo.id); App.refresh();
+    U.toast(roomNo + ' 房复洁场景已生成；当前已切换吴国庆，可直接完成维修');
+  });
+
   resetBtn.addEventListener('click', function () {
     if (!window.confirm('确认重置人工验收数据？当前浏览器里本轮验收产生的任务、消息和操作记录会清空，然后恢复到干净验收基线。')) return;
     var restoreUser = select.value || 'u_3';
