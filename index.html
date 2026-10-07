@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 23:26 · 全局留痕与已完成记录回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 23:55 · 多链路真实待办与发起人回看回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -6358,10 +6358,8 @@ window.Sales = (function () {
       requirement: o.requirement || '', remark: o.remark || '',
       status: 'pending',
       foBy: '', foByName: '', foAt: 0, foResult: '', foNote: '', pmsRef: '',
-      receivedAt: 0, receivedBy: '', receivedNote: '',
-      needInfoAt: 0, needInfoBy: '', needInfoNote: '',
-      bookedAt: 0, bookedBy: '', bookedNote: '',
-      resubmittedAt: 0, resubmittedBy: '',
+      receivedAt: 0, receivedBy: '', receivedNote: '', needInfoAt: 0, needInfoBy: '', needInfoNote: '',
+      bookedAt: 0, bookedBy: '', bookedNote: '', resubmittedAt: 0, resubmittedBy: '',
       createdAt: Date.now()
     });
     /* 前厅首页出现「销售预订待确认」 */
@@ -6411,15 +6409,12 @@ window.Sales = (function () {
     } else if (['pending', 'needinfo'].indexOf(r.status) < 0) {
       return Policy.fail('当前状态不可确认：' + stName(r.status));
     }
-    var at = Date.now();
-    var milestone = {};
+    var at = Date.now(), milestone = {};
     if (result === 'received') milestone = { receivedAt: at, receivedBy: me.id, receivedNote: o.note || '' };
     if (result === 'needinfo') milestone = { needInfoAt: at, needInfoBy: me.id, needInfoNote: o.note || '' };
     if (result === 'booked') milestone = { bookedAt: at, bookedBy: me.id, bookedNote: o.note || '' };
     DB.update('salesReservations', id, Object.assign({
-      status: result,
-      foBy: me.id, foByName: me.name, foAt: at,
-      foResult: result, foNote: o.note || '',
+      status: result, foBy: me.id, foByName: me.name, foAt: at, foResult: result, foNote: o.note || '',
       pmsRef: result === 'booked' ? (o.pmsRef || r.pmsRef || '') : (r.pmsRef || '')
     }, milestone));
     /* 销售看到结果（§15-12） */
@@ -7368,8 +7363,7 @@ window.Engine = (function () {
       });
       DB.insert('workOrders', wo);
       if (wo.assigneeId) {
-        notify(wo.assigneeId, { type: 'task', title: '新工单待接单', content: wo.title + ' · ' + wo.location,
-          refType: wo.taskId ? 'task' : 'workorder', refId: wo.taskId || wo.id });
+        notify(wo.assigneeId, { type: 'task', title: '新工单待接单', content: wo.title + ' · ' + wo.location, refType: wo.taskId ? 'task' : 'workorder', refId: wo.taskId || wo.id });
       } else if (!o.poolTask) {
         // 非任务池的未指定工单才提醒主管；工程共享池由 Pool/部门提醒负责
         var mh = Policy.whoHas('maintain').filter(function (u) { return AuthContext.inScope(u); })[0];
@@ -7558,19 +7552,15 @@ window.Engine = (function () {
           }
         }
       }
-      /* 工程工单闭环时同步关闭对应客需。 */
+      /* 工程工单真正闭环时同步关闭对应客需，避免前厅残留“待处理客需”。 */
       if ((act === 'finish' && !(wo.requiresAcceptance === true || wo.needsAcceptance === true)) || act === 'verify') {
         DB.find('guestRequests', function (g) {
           return AuthContext.inScope(g) && g.workOrderId === wo.id && g.status !== 'done' && g.status !== 'canceled';
         }).forEach(function (g) {
-          DB.update('guestRequests', g.id, {
-            status: 'done', completedAt: now,
-            currentOwnerId: wo.assigneeId || Session.me.id,
-            result: extra.result || wo.result || '工程处理完成'
-          });
+          DB.update('guestRequests', g.id, { status: 'done', completedAt: now,
+            currentOwnerId: wo.assigneeId || Session.me.id, result: extra.result || wo.result || '工程处理完成' });
         });
       }
-
       /* 维修真正闭环后回写关联客房清扫。
        * 无需验收：维修完成即回写；需要验收：验收通过后才回写。 */
       if ((act === 'finish' && !(wo.requiresAcceptance === true || wo.needsAcceptance === true)) || act === 'verify') {
@@ -10717,7 +10707,7 @@ window.Engine = (function () {
         });
       });
 
-      /* 无父 task 的工程工单本身就是“我的工作”，不能只靠通知存在。 */
+      /* 没有父 task 的工程工单也必须进入工程人员“我的工作”，不能只靠通知存在。 */
       if (Policy.can(me, 'maintain')) {
         DB.find('workOrders', function (w) {
           return AuthContext.inScope(w) && !w.taskId && w.assigneeId === me.id
@@ -10726,8 +10716,7 @@ window.Engine = (function () {
           out.push({
             id: 'workorder:' + w.id, refType: 'workorder', refId: w.id, kind: 'workorder',
             statusGroup: w.status === 'wait' ? 'waiting' : (w.status === 'waiting_part' || w.status === 'cant' ? 'paused' : 'doing'),
-            priority: w.priority || 'normal',
-            title: w.title || ('工程工单 · ' + w.code),
+            priority: w.priority || 'normal', title: w.title || ('工程工单 · ' + w.code),
             subtitle: (w.location || '') + ' · ' + (w.status === 'wait' ? '待接单' : w.status === 'accepted' ? '已接单 · 待开始' : w.status === 'doing' ? '维修进行中' : '待继续处理'),
             route: 'wo/' + w.id, dueAt: w.dueAt || 0, createdAt: w.createdAt || 0
           });
@@ -10838,16 +10827,15 @@ window.Engine = (function () {
         });
       }
 
-      /* 销售收到需补充资料时是本人真实待办。 */
+      /* 销售收到“需补充资料”是本人真实待办；普通进度回执不制造待办。 */
       if (Policy.businessEnabled('sales', me.hotelId) && Policy.can(me, 'sales')) {
         DB.find('salesReservations', function (r) {
           return AuthContext.inScope(r) && r.salesId === me.id && r.status === 'needinfo';
         }).forEach(function (r) {
           out.push({
             id: 'salesNeedInfo:' + r.id, refType: 'salesReservations', refId: r.id, kind: 'sales_reservation',
-            statusGroup: 'confirm', priority: 'high',
-            title: '预订需补充资料 · ' + (r.customer || r.team || r.code),
-            subtitle: r.foNote || '前厅要求补充预订信息',
+            statusGroup: 'confirm', priority: 'high', title: '预订需补充资料 · ' + (r.customer || r.team || r.code),
+            subtitle: r.needInfoNote || r.foNote || '前厅要求补充预订信息',
             route: 'sales-reservation/' + r.id, dueAt: 0, createdAt: r.needInfoAt || r.foAt || r.createdAt || 0
           });
         });
@@ -10942,7 +10930,7 @@ window.Engine = (function () {
       }).forEach(function (g) {
         out.push({ id: 'guest:' + g.id, kind: 'guest', title: '客人需求 · ' + (g.roomNo || '') + ' 房', subtitle: g.typeName || g.content || '已完成', completedAt: g.completedAt, route: 'guest-request/' + g.id });
       });
-      /* 已完成档案同时属于执行人和发起人。 */
+      /* 发起人也必须拥有闭环档案；已完成不只属于亲手执行的人。 */
       DB.find('guestRequests', function (g) {
         if (!AuthContext.inScope(g) || g.status !== 'done' || !g.completedAt) return false;
         var initiator = g.creatorId || '';
@@ -10950,8 +10938,7 @@ window.Engine = (function () {
         if (!initiator && g.workOrderId) { var gw = DB.byId('workOrders', g.workOrderId); initiator = gw && gw.creatorId; }
         return initiator === me.id;
       }).forEach(function (g) {
-        out.push({ id: 'guest-origin:' + g.id, kind: 'guest_origin',
-          title: '我发起 · ' + (g.roomNo || '') + ' 房' + (g.typeName || '住客服务'),
+        out.push({ id: 'guest-origin:' + g.id, kind: 'guest_origin', title: '我发起 · ' + (g.roomNo || '') + ' 房' + (g.typeName || '住客服务'),
           subtitle: (g.result || '已完成') + (g.currentOwnerId ? ' · ' + DB.userName(g.currentOwnerId) + '完成' : ''),
           completedAt: g.completedAt, route: 'guest-request/' + g.id });
       });
@@ -10976,8 +10963,8 @@ window.Engine = (function () {
         return AuthContext.inScope(r) && r.status === 'booked' && r.salesId === me.id && !!(r.bookedAt || r.foAt);
       }).forEach(function (r) {
         out.push({ id: 'sales-origin:' + r.id, kind: 'sales_reservation', title: '客房预订已完成 · ' + (r.customer || r.team || r.code),
-          subtitle: r.pmsRef ? ('PMS ' + r.pmsRef) : '前厅已完成预订',
-          completedAt: r.bookedAt || r.foAt, route: 'sales-reservation/' + r.id });
+          subtitle: (r.pmsRef ? 'PMS ' + r.pmsRef : '前厅已完成预订'), completedAt: r.bookedAt || r.foAt,
+          route: 'sales-reservation/' + r.id });
       });
 
       DB.find('taskInstances', function (x) {
@@ -11826,15 +11813,7 @@ window.GuestReq = (function () {
     return TYPES.filter(function (x) { return x.key === k; })[0]
       || { key: k, name: k || '其它需求', icon: '🙋', dept: 'd_fo', alsoVisible: [], hint: '' };
   }
-  function hotelId() {
-    var s = (typeof AuthContext !== 'undefined' && AuthContext.scope) ? AuthContext.scope() : {};
-    return s.hotelId || (DB.all('hotels')[0] || {}).id || 'h_1';
-  }
-  function tenantId() {
-    var s = (typeof AuthContext !== 'undefined' && AuthContext.scope) ? AuthContext.scope() : {};
-    var h = DB.byId('hotels', hotelId());
-    return s.tenantId || (h && h.tenantId) || '';
-  }
+  function hotelId() { return (DB.all('hotels')[0] || {}).id || 'h_1'; }
 
   /**
    * 客人扫码提交需求
@@ -11851,7 +11830,7 @@ window.GuestReq = (function () {
 
     var now = Date.now();
     var req = DB.insert('guestRequests', {
-      id: U.uid('gq'), hotelId: hotelId(), tenantId: tenantId(),
+      id: U.uid('gq'), hotelId: hotelId(),
       code: 'FW' + U.ymd().replace(/-/g, '') + '-' + U.pad2(DB.nextSeq('FW')),
       roomId: o.roomId, roomNo: room.number, floor: room.floor || '', zone: room.zone || '',
       guestRequestType: tp.key, typeName: tp.name, content: o.content || tp.name,
@@ -11866,20 +11845,13 @@ window.GuestReq = (function () {
       guestNote: o.guestNote || ''
     });
 
-    /* 前厅现场或机器人已经解决的房间服务只留业务记录，不再派给客房。 */
+    /* 前厅现场/机器人已经解决的房间服务只留档，不再派给客房；设施设备问题必须进工程。 */
     if (o.directResolve) {
       var resolver = Engine.Session.me;
       if (!resolver || !Policy.can(resolver, 'frontdesk')) return { ok: false, reason: '只有前厅可登记现场/机器人已解决' };
       if (tp.dept !== 'd_hk' || tp.repair) return { ok: false, reason: '设施设备问题必须进入工程处理' };
-      DB.update('guestRequests', req.id, {
-        status: 'done', currentOwnerId: resolver.id,
-        acceptedAt: now, completedAt: now,
-        result: o.result || '前厅/机器人已处理', resolveMode: o.resolveMode || 'frontdesk'
-      });
-      Engine.Audit && Engine.Audit.write({
-        targetType: 'guestRequest', targetId: req.id, targetName: req.code + ' ' + req.roomNo,
-        action: '前厅直接解决住客需求', field: 'status', from: '待处理', to: '已完成', reason: o.result || '前厅/机器人已处理'
-      });
+      DB.update('guestRequests', req.id, { status: 'done', currentOwnerId: resolver.id, acceptedAt: now, completedAt: now,
+        result: o.result || '前厅/机器人已处理', resolveMode: o.resolveMode || 'frontdesk' });
       Engine.log('前厅直接解决客房服务', req.code + ' ' + room.number + ' ' + tp.name);
       return { ok: true, request: DB.byId('guestRequests', req.id), directResolved: true };
     }
@@ -12029,7 +12001,6 @@ window.GuestReq = (function () {
     if (!u) return [];
     var isGMish = Policy.can(u, 'manage_org') || (u.roles || []).indexOf('gm') >= 0;
     return all({ open: true }).filter(function (r) {
-      /* 已生成 task/workorder 后，执行待办由真正业务对象承接；客需页只保留全店进度档案。 */
       if (r.taskId || r.workOrderId) return false;
       if (r.currentOwnerId === userId) return true;
       if (isGMish) return true;
@@ -22274,12 +22245,9 @@ App.act('gq-new-submit', function (el) {
 App.act('gq-new-resolve', function (el) {
   var note = ((document.getElementById('gq-new-note') || {}).value || '').trim();
   var tp = GuestReq.typeOf(el.getAttribute('data-type'));
-  var res = GuestReq.create({
-    roomId: el.getAttribute('data-room'), type: tp.key,
-    content: note || tp.name, source: '前厅代客发起',
-    directResolve: true, resolveMode: 'frontdesk_or_robot',
-    result: note ? ('前厅/机器人已处理：' + note) : '前厅/机器人已处理'
-  });
+  var res = GuestReq.create({ roomId: el.getAttribute('data-room'), type: tp.key, content: note || tp.name,
+    source: '前厅代客发起', directResolve: true, resolveMode: 'frontdesk_or_robot',
+    result: note ? ('前厅/机器人已处理：' + note) : '前厅/机器人已处理' });
   DB.flush();
   if (!res.ok) { U.toast(res.reason || '登记失败'); return; }
   App.closeSheet(); U.toast('已记录为前厅/机器人直接完成'); App.go('guest?tab=all');
