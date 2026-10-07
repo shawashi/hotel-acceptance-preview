@@ -10829,7 +10829,22 @@ window.Engine = (function () {
 
       /* 销售收到“需补充资料”是本人真实待办；普通进度回执不制造待办。 */
       if (Policy.businessEnabled('sales', me.hotelId) && Policy.can(me, 'sales')) {
-        DB.find('salesReservations', function (r) {
+        /* 工程执行人自己的闭环历史必须保留真实工单，不依赖客需外壳。
+       * 这样工程在“我的工作 → 已完成”中能直接回看自己接单并完成的维修工单。 */
+      DB.find('workOrders', function (w) {
+        return AuthContext.inScope(w) && w.status === 'done'
+          && (w.assigneeId === me.id || w.actualExecutorId === me.id)
+          && !!(w.finishAt || w.verifiedAt);
+      }).forEach(function (w) {
+        out.push({
+          id: 'wo-exec:' + w.id, kind: 'workorder_exec',
+          title: '工程维修 · ' + (w.title || w.code),
+          subtitle: (w.result || '已完成') + (w.location ? ' · ' + w.location : ''),
+          completedAt: w.verifiedAt || w.finishAt, route: 'wo/' + w.id
+        });
+      });
+
+      DB.find('salesReservations', function (r) {
           return AuthContext.inScope(r) && r.salesId === me.id && r.status === 'needinfo';
         }).forEach(function (r) {
           out.push({
@@ -20793,6 +20808,10 @@ App.page('sales-reservation', {
       + (x.bookedAt ? '<div class="t-xs c3 mt8">前厅完成预订：' + U.esc(DB.userName(x.bookedBy)) + ' · ' + U.mdhm(x.bookedAt) + (x.bookedNote ? ' · ' + U.esc(x.bookedNote) : '') + '</div>' : '')
       + (x.pmsRef ? '<div class="t-xs c3 mt8">PMS预订号：' + U.esc(x.pmsRef) + '</div>' : '')
       + '</div>';
+    if (isSales && x.salesId === me.id && x.status === 'needinfo') {
+      html += '<div class="notice">前厅要求你补充资料。补充并重新提交后，这条事项会自动从「需要我处理 / 我的工作」移除，重新回到前厅待确认。</div>'
+        + '<div class="btn btn-primary btn-block mt12" data-act="sl-resubmit" data-id="' + x.id + '">补充资料并重新提交</div>';
+    }
     if (isFO && x.status === 'pending') {
       html += '<div class="btn btn-primary btn-block" data-act="sl-fo" data-id="' + x.id + '" data-k="received">确认收到</div>'
         + '<div class="btn btn-ghost btn-block mt8" data-act="sl-fo" data-id="' + x.id + '" data-k="needinfo">需补充信息</div>';
@@ -22233,24 +22252,14 @@ App.act('gq-new-submit', function (el) {
   App.sheet({
     title: DB.roomNo(roomId) + ' 房 · ' + tp.name,
     body: '<div class="pad" style="padding:8px 18px">'
-      + '<div class="t-sm c2">' + (tp.dept === 'd_hk' ? '如果前厅现场或机器人已经能解决，可直接登记完成；只有确实需要客房人员执行时才派给客房。' : '设施设备问题直接生成工程工单，前厅只跟踪结果，不自己接单。') + '</div>'
+      + '<div class="t-sm c2">' + (tp.dept === 'd_hk'
+        ? '这里仅用于前厅把客人需求派给客房人员。前厅自己能用机器人或现场解决的事情，不需要在系统里发任务。'
+        : '设施设备问题由前厅发起给工程人员处理；前厅只看进度和结果，不接自己的工单。') + '</div>'
       + '<textarea class="inp mt12" id="gq-new-note" placeholder="补充具体情况（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:76px"></textarea></div>',
-    foot: '<button class="btn btn-ghost" data-act="close-sheet">取消</button>'
-      + (tp.dept === 'd_hk'
-        ? '<button class="btn btn-ghost grow" data-act="gq-new-resolve" data-room="' + roomId + '" data-type="' + type + '">前厅/机器人已解决</button>'
-          + '<button class="btn btn-primary grow" data-act="gq-new-save" data-room="' + roomId + '" data-type="' + type + '">派给客房</button>'
-        : '<button class="btn btn-primary grow" data-act="gq-new-save" data-room="' + roomId + '" data-type="' + type + '">发起工程报修</button>')
+    foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      + '<button class="btn btn-primary grow" data-act="gq-new-save" data-room="' + roomId + '" data-type="' + type + '">'
+      + (tp.dept === 'd_hk' ? '派给客房' : '发起工程报修') + '</button>'
   });
-});
-App.act('gq-new-resolve', function (el) {
-  var note = ((document.getElementById('gq-new-note') || {}).value || '').trim();
-  var tp = GuestReq.typeOf(el.getAttribute('data-type'));
-  var res = GuestReq.create({ roomId: el.getAttribute('data-room'), type: tp.key, content: note || tp.name,
-    source: '前厅代客发起', directResolve: true, resolveMode: 'frontdesk_or_robot',
-    result: note ? ('前厅/机器人已处理：' + note) : '前厅/机器人已处理' });
-  DB.flush();
-  if (!res.ok) { U.toast(res.reason || '登记失败'); return; }
-  App.closeSheet(); U.toast('已记录为前厅/机器人直接完成'); App.go('guest?tab=all');
 });
 
 App.act('gq-new-save', function (el) {
