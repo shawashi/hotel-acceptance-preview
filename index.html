@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 21:44 · 全局留痕与已完成记录回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 22:12 · 全局留痕与已完成记录回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -6804,6 +6804,15 @@ window.Engine = (function () {
       var bf = DB.byId('breakfastDays', n.refId);
       return !!bf && !!bf.firstAt && !bf.ackAt && !bf.actualAt;
     }
+    if (n.refType === 'salesReservations') {
+      var sr = DB.byId('salesReservations', n.refId), su = DB.byId('users', n.userId);
+      if (!sr || !su) return false;
+      /* 前厅：pending/received 都是连续待办；销售：只有需补资料才需要动作。
+       * “前厅已收到/已完成”对销售只是回执，不应进入“需要我处理”。 */
+      if (Policy.can(su, 'frontdesk')) return sr.status === 'pending' || sr.status === 'received';
+      if (Policy.can(su, 'sales')) return sr.salesId === su.id && sr.status === 'needinfo';
+      return false;
+    }
     return !n.read;
   }
 
@@ -10791,7 +10800,7 @@ window.Engine = (function () {
         }).forEach(function (r) {
           out.push({
             id: 'salesReservation:' + r.id, refType: 'salesReservations', refId: r.id, kind: 'sales_reservation',
-            statusGroup: r.status === 'pending' ? 'confirm' : 'doing', priority: 'normal',
+            statusGroup: r.status === 'pending' ? 'confirm' : 'doing', priority: 'high',
             title: '客房预订 · ' + (r.customer || r.team || r.code),
             subtitle: r.status === 'pending' ? '销售提交 · 待确认收到' : '前厅已收到 · 待完成 PMS 预订',
             route: 'sales-reservation/' + r.id, dueAt: 0, createdAt: r.createdAt || 0
@@ -13785,7 +13794,7 @@ function staffEntries(u) {
     add('go-room-swap', '换房处理', '🔄', '#eaf1fd');
     if (Policy.businessEnabled('sales', u.hotelId)) add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
     if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-breakfast-forecast', '住客早餐', '🥐', '#e7f6ef');
-    add('go-guest', '客人需求', '🙋', '#eaf1fd');
+    add('go-guest', '住客服务', '🙋', '#eaf1fd');
     add('go-complaint', '客诉受理', '🙋', '#fdecec');
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
@@ -13806,7 +13815,7 @@ function staffEntries(u) {
 function staffEntryGroups(u) {
   var ops = staffEntries(u);
   var core = Policy.can(u, 'frontdesk')
-    ? ['go-meal', 'go-breakfast-forecast', 'tm-new', 'go-guest', 'go-handover'] : [];
+    ? ['go-meal', 'go-guest', 'go-breakfast-forecast', 'tm-new', 'go-handover'] : [];
   var primary = core.map(function (k) { return ops.find(function (o) { return o.k === k; }); }).filter(Boolean);
   var lowFrequency = ['go-catering-close-history'];
   var rest = ops.filter(function (o) { return core.indexOf(o.k) < 0 && lowFrequency.indexOf(o.k) < 0; });
@@ -14223,7 +14232,7 @@ App.act('go-search', function () { App.go('search'); });
 App.act('go-mywo', function () { App.go('mywo'); });
 /* V4.3.1 首页新增入口 */
 App.act('go-guest', function () { App.go('guest?tab=todo'); });
-App.act('go-guest-internal', function () { App.go('guest?tab=internal'); });
+App.act('go-guest-internal', function () { App.go('guest?tab=new'); });
 App.act('go-maint', function () { App.go('maint?tab=todo'); });
 App.act('go-recurring', function () { App.go('recurring?tab=today'); });
 App.act('go-cost', function () { App.go('cost?range=today'); });
@@ -21974,7 +21983,7 @@ App.act('mt-plan-toggle', function (el) {
  * ======================================================================= */
 
 App.page('guest', {
-  title: '客人服务动态',
+  title: '住客服务',
   render: function (r) {
     var me = Engine.Session.user();
     var tab = r.params.tab || 'todo';
@@ -21984,10 +21993,9 @@ App.page('guest', {
 
     var tabs = [
       { k: 'todo', n: '我的待办 ' + todo.length },
-      { k: 'all', n: '全店动态 ' + openCount },
-      { k: 'qr', n: '客人扫码' }
+      { k: 'all', n: '全部需求 ' + openCount }
     ];
-    if (Policy.can(me, 'dispatch_housekeeping')) tabs.push({ k: 'internal', n: '内部代发' });
+    if (Policy.can(me, 'frontdesk') || Policy.can(me, 'dispatch_housekeeping')) tabs.push({ k: 'new', n: '代客发起' });
     var html = '<div class="pad mt12">' + Comp.seg(tabs, tab, 'gq-tab') + '</div>';
 
     if (tab === 'todo') {
@@ -22001,20 +22009,24 @@ App.page('guest', {
         + '<div class="t-xs c3">任何内部员工主动进入都能看到全部客人请求 —— 这是共享事实，不是广播。</div></div>';
       if (!feed.length) html += Comp.empty('还没有客人扫码需求', '🙋');
       else html += '<div class="list">' + feed.map(function (x) { return reqRow(x, false); }).join('') + '</div>';
-    } else if (tab === 'internal' && Policy.can(me, 'dispatch_housekeeping')) {
-      html += '<div class="card mt12"><div class="card-head"><div class="card-title">客房临时任务</div></div>'
-        + '<div class="t-xs c3">用于前厅电话、销售交代或其他授权人员代发。只选择房间、任务类型和一句说明，客房端统一收到。</div></div>';
+    } else if (tab === 'new' && (Policy.can(me, 'frontdesk') || Policy.can(me, 'dispatch_housekeeping'))) {
+      html += '<div class="card mt12"><div class="card-head"><div class="card-title">代客发起住客服务</div></div>'
+        + '<div class="t-xs c3">电话、当面等渠道收到的住客需求统一从这里录入。与住客扫码使用同一业务模型，系统按需求类型自动路由客房或工程。</div></div>';
       html += '<div class="card mt12"><div class="card-head"><div class="card-title">选择房间</div></div>'
         + '<div class="opt-grid c4">' + DB.all('rooms').slice(0, 36).map(function (rm) {
-          return '<div class="opt" data-act="gq-pick-internal-room" data-id="' + rm.id + '"><span class="oe">🚪</span>' + U.esc(rm.number) + '</div>';
+          return '<div class="opt" data-act="gq-pick-new-room" data-id="' + rm.id + '"><span class="oe">🚪</span>' + U.esc(rm.number) + '</div>';
         }).join('') + '</div></div>';
       if (r.params.roomId) {
-        var irm = DB.byId('rooms', r.params.roomId);
-        var hkTypes = GuestReq.TYPES.filter(function (t) { return t.group === 'room_service'; });
-        html += '<div class="card mt12"><div class="card-head"><div class="card-title">' + U.esc(irm ? irm.number : '') + ' 房 · 需要客房做什么？</div></div>'
-          + '<div class="opt-grid c3">' + hkTypes.map(function (t) {
-            return '<div class="opt" data-act="gq-internal-submit" data-room="' + U.esc(r.params.roomId) + '" data-type="' + t.key + '">'
-              + '<span class="oe">' + t.icon + '</span>' + U.esc(t.name) + '</div>';
+        var nrm = DB.byId('rooms', r.params.roomId);
+        var roomService2 = GuestReq.TYPES.filter(function (t) { return t.group === 'room_service'; });
+        var facility2 = GuestReq.TYPES.filter(function (t) { return t.group === 'facility'; });
+        html += '<div class="card mt12"><div class="card-head"><div class="card-title">' + U.esc(nrm ? nrm.number : '') + ' 房 · 房间服务</div></div>'
+          + '<div class="opt-grid c2">' + roomService2.map(function (t) {
+            return '<div class="opt" data-act="gq-new-submit" data-room="' + U.esc(r.params.roomId) + '" data-type="' + t.key + '"><span class="oe">' + t.icon + '</span>' + U.esc(t.name) + '</div>';
+          }).join('') + '</div></div>'
+          + '<div class="card mt12"><div class="card-head"><div class="card-title">设施设备</div></div>'
+          + '<div class="opt-grid c2">' + facility2.map(function (t) {
+            return '<div class="opt" data-act="gq-new-submit" data-room="' + U.esc(r.params.roomId) + '" data-type="' + t.key + '"><span class="oe">' + t.icon + '</span>' + U.esc(t.name) + '</div>';
           }).join('') + '</div></div>';
       }
     } else {
@@ -22098,7 +22110,8 @@ App.act('gq-open', function (el) { App.go('guest-request/' + el.getAttribute('da
 
 App.act('gq-tab', function (el) { App.go('guest?tab=' + el.getAttribute('data-k')); });
 App.act('gq-pick-room', function (el) { App.go('guest?tab=qr&roomId=' + el.getAttribute('data-id')); });
-App.act('gq-pick-internal-room', function (el) { App.go('guest?tab=internal&roomId=' + el.getAttribute('data-id')); });
+App.act('gq-pick-new-room', function (el) { App.go('guest?tab=new&roomId=' + el.getAttribute('data-id')); });
+App.act('gq-pick-internal-room', function (el) { App.go('guest?tab=new&roomId=' + el.getAttribute('data-id')); });
 
 App.act('gq-submit', function (el) {
   var res = GuestReq.create({
@@ -22106,6 +22119,30 @@ App.act('gq-submit', function (el) {
   });
   U.toast(res.ok ? '需求已提交，已按默认路由流转' : res.reason);
   if (res.ok) { DB.flush(); App.go('guest?tab=todo'); }
+});
+
+App.act('gq-new-submit', function (el) {
+  var roomId = el.getAttribute('data-room'), type = el.getAttribute('data-type');
+  var tp = GuestReq.typeOf(type);
+  App.sheet({
+    title: DB.roomNo(roomId) + ' 房 · ' + tp.name,
+    body: '<div class="pad" style="padding:8px 18px">'
+      + '<div class="t-sm c2">记录住客实际提出的需求，系统会自动路由责任部门。</div>'
+      + '<textarea class="inp mt12" id="gq-new-note" placeholder="补充具体情况（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:76px"></textarea></div>',
+    foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      + '<button class="btn btn-primary grow" data-act="gq-new-save" data-room="' + roomId + '" data-type="' + type + '">发起服务</button>'
+  });
+});
+App.act('gq-new-save', function (el) {
+  var note = ((document.getElementById('gq-new-note') || {}).value || '').trim();
+  var tp = GuestReq.typeOf(el.getAttribute('data-type'));
+  var res = GuestReq.create({
+    roomId: el.getAttribute('data-room'), type: tp.key,
+    content: note || tp.name, source: '前厅代客发起'
+  });
+  DB.flush();
+  if (!res.ok) { U.toast(res.reason || '发起失败'); return; }
+  App.closeSheet(); U.toast('已发起，系统已自动路由'); App.go('guest?tab=todo');
 });
 
 App.act('gq-internal-submit', function (el) {
