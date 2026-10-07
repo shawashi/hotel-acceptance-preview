@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 03:41 · 手机启动+查房工程联动修复版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 14:46 · DEV-002 前厅入口与餐饮回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -4628,6 +4628,7 @@ window.Breakfast = (function () {
     if (!cnt && cnt !== 0) return Policy.fail('请填写预计用餐人数');
 
     var isFirst = !d.firstAt;
+    var previousForecast = d.finalForecast;
     var patch = { updatedAt: now, finalForecast: cnt, ackAt: 0, ackBy: '', ackByName: '' };
     if (isFirst) { patch.firstForecast = cnt; patch.firstBy = me.id; patch.firstAt = now; }
     patch.status = d.actual ? 'done' : 'waitActual';
@@ -4640,7 +4641,7 @@ window.Breakfast = (function () {
     /* 每次修改都留下前后值与修改人（历史不被覆盖） */
     DB.insert('breakfastForecasts', AuthContext.stamp({
       id: U.uid('bff'), dayId: d.id, date: d.date, seq: (DB.find('breakfastForecasts', function (x) { return x.dayId === d.id; }).length + 1),
-      from: isFirst ? 0 : d.finalForecast, to: cnt, by: me.id, byName: me.name,
+      from: isFirst ? 0 : previousForecast, to: cnt, by: me.id, byName: me.name,
       snap: Engine.Snapshot.of(me.id), at: now, reason: o.reason || (isFirst ? '首次预计' : '调整预计'),
       source: 'manual'
     }));
@@ -13549,13 +13550,17 @@ function homeStaff(me) {
   }
   html += '</div>';
 
-  /* ---- 高频入口（V4.2 §11：按能力动态生成，与本人无关的入口不出现，最多 6 个） ---- */
-  var ops = staffEntries(me);
+  /* ---- 核心入口优先；其余能力保留清晰的二级入口，不截断丢失。 ---- */
 
+  var entryGroups = staffEntryGroups(me);
   html += '<div class="card"><div class="card-head"><div class="card-title">常用</div></div>'
-    + '<div class="enter-grid">' + ops.map(function (o) {
+    + '<div class="enter-grid">' + entryGroups.primary.map(function (o) {
       return '<div class="enter" data-act="' + o.k + '"><div class="ei" style="background:' + o.bg + '">' + o.i + '</div><div class="en">' + o.n + '</div></div>';
     }).join('') + '</div></div>';
+
+  var moreOps = entryGroups.more;
+  if (moreOps.length) html += '<details class="card"><summary class="card-title">更多业务（' + moreOps.length + '）</summary>'
+    + '<div class="enter-grid mt12">' + moreOps.map(function (o) { return enterBox(o.k, o.n, o.i, o.bg, 0); }).join('') + '</div></details>';
 
   /* ---- 我的消息（只显示需要本人处理的） ---- */
   var msgs = DB.find('notifications', function (n) {
@@ -13592,12 +13597,12 @@ function staffEntries(u) {
   if (Policy.businessEnabled('staff_meal', u.hotelId)) add('go-meal', '员工餐申报', '🍚', '#faf4e9');
 
   /* 销售岗位继续收敛：部门业务只保留高频事项；个人员工餐独立保留。 */
-  if (Policy.businessEnabled('sales', u.hotelId) && Policy.can(u, 'sales')) {
+  if (Policy.businessEnabled('sales', u.hotelId) && Policy.can(u, 'sales') && !Policy.can(u, 'frontdesk')) {
     add('sl-new', '客房预订', '🛏', '#faf4e9');
     if (Policy.businessEnabled('meeting', u.hotelId)) add('mt-reserve-new', '会议室预订', '📅', '#eaf1fd');
     if (Policy.businessEnabled('restaurant', u.hotelId) && TeamMeal.canArrange(u)) add('tm-new', '团餐发起', '🍱', '#faf4e9');
     if (Policy.businessEnabled('housekeeping', u.hotelId) && Policy.can(u, 'inspect')) add('go-hk-inspect', '客房查房', '🔍', '#eaf1fd');
-    return ops.slice(0, 6);
+    return ops;
   }
 
   if (Policy.businessEnabled('restaurant', u.hotelId) && TeamMeal.canArrange(u)) add('tm-new', '团餐发起', '🍱', '#faf4e9');
@@ -13611,7 +13616,8 @@ function staffEntries(u) {
     add('hk-batch', '发起客房作业', '🧹', '#f0ecfd');
     add('go-room-swap', '换房处理', '🔄', '#eaf1fd');
     if (Policy.businessEnabled('sales', u.hotelId)) add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
-    if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-catering', '住客早餐', '🥐', '#e7f6ef');
+    if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-breakfast-forecast', '住客早餐', '🥐', '#e7f6ef');
+    add('go-guest', '住客需求', '🙋', '#eaf1fd');
     add('go-complaint', '客诉受理', '🙋', '#fdecec');
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
@@ -13624,7 +13630,17 @@ function staffEntries(u) {
   if (Policy.can(u, 'manage_recurring_task')) add('go-recurring', '周期任务', '🔁', '#eaf1fd');
   if (Policy.can(u, 'view_cost') && Policy.isSupervisor(u) && !Policy.can(u, 'sales')) add('go-cost', '运营成本', '💰', '#faf4e9');
 
-  return ops.slice(0, Policy.isSupervisor(u) ? 8 : 6);
+  return ops;
+}
+/* 前厅核心责任显式优先；更多业务保留全部已授权能力。 */
+function staffEntryGroups(u) {
+  var ops = staffEntries(u);
+  var core = Policy.can(u, 'frontdesk')
+    ? ['go-meal', 'go-breakfast-forecast', 'tm-new', 'go-handover'] : [];
+  var primary = core.map(function (k) { return ops.find(function (o) { return o.k === k; }); }).filter(Boolean);
+  var rest = ops.filter(function (o) { return core.indexOf(o.k) < 0; });
+  var count = Math.max(0, 6 - primary.length);
+  return { primary: primary.concat(rest.slice(0, count)), more: rest.slice(count) };
 }
 /* ==========================================================================
  * 部门负责人首页
@@ -14033,6 +14049,8 @@ App.act('mywork-open', function (el) {
   var route = el.getAttribute('data-route');
   if (route) App.go(route);
 });
+
+App.act('go-breakfast-forecast', function () { App.go('breakfast-forecast'); });
 
 </script>
 <script>
@@ -20535,7 +20553,7 @@ App.act('bf-ack', function (el) {
 
 
 App.act('bf-forecast', function () {
-  var d = Breakfast.day();
+  var d = Breakfast.day(U.ymd(Date.now() + 86400000), false) || { detail: {} };
   App.sheet({
     title: '预计早餐人数',
     body: '<div class="pad" style="padding:8px 18px">'
@@ -20575,7 +20593,7 @@ App.act('bf-forecast-save', function () {
   var res = Breakfast.forecast(n, {
     date: U.ymd(Date.now() + 86400000),
     reason: (document.getElementById('bf-reason') || {}).value || '',
-    detail: { adults: adults, children: children }
+    adults: adults, children: children
   });
   DB.flush(); App.closeSheet();
   U.toast(res && res.ok !== false ? '已保存预计人数' : ((res && res.reason) || '保存失败'));
@@ -20710,6 +20728,26 @@ App.page('team-meal', {
       html += '<div class="card"><div class="t-sm c2">当前没有需要你执行的操作；信息可继续查看。</div></div>';
     }
     return html;
+  }
+});
+
+/* 前厅早餐上游专页：复用预计录入/历史，不经过餐饮总览。 */
+App.page('breakfast-forecast', {
+  title: '住客早餐预计',
+  render: function () {
+    var me = Engine.Session.user();
+    if (!Breakfast.canForecast(me)) return Comp.empty('没有早餐预计权限');
+    var date = U.ymd(Date.now() + 86400000), d = Breakfast.day(date, false);
+    return '<div class="card mt12"><div class="card-title">' + U.esc(date) + ' 住客早餐</div>'
+      + '<div class="t-md mt12">' + (d && d.firstAt ? '首次预计 ' + d.firstForecast + ' 人 · 最终预计 ' + d.finalForecast + ' 人' : '尚未录入预计人数') + '</div>'
+      + (Policy.businessEnabled('guest_breakfast', me.hotelId)
+        ? '<div class="btn btn-primary btn-block mt12" data-act="bf-forecast">录入 / 修订预计人数</div>'
+        : '<div class="t-xs c3 mt12">住客早餐已关闭，历史仍保留。</div>')
+      + '<div class="t-md t-w6 mt12">预计修订历史</div>'
+      + (Breakfast.history(date).map(function (h) {
+        return '<div class="t-xs c3 mt8">' + U.esc(h.byName || DB.userName(h.by)) + ' · '
+          + h.from + ' → ' + h.to + ' 人 · ' + U.esc(h.reason || '') + ' · ' + U.esc(U.relTime(h.at)) + '</div>';
+      }).join('') || '<div class="t-xs c3 mt8">暂无修订记录</div>') + '</div>';
   }
 });
 
