@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 20:12 · 全局留痕与已完成记录回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 21:44 · 全局留痕与已完成记录回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -6348,7 +6348,7 @@ window.Sales = (function () {
       customer: o.customer || '', team: o.team || '',
       contact: o.contact || '', phone: o.phone || '',
       checkIn: o.checkIn, checkOut: o.checkOut,
-      roomTypes: types.map(function (x) { return { type: x.type, qty: Number(x.qty) }; }),
+      roomTypes: types.map(function (x) { return { type: x.type, qty: Number(x.qty), pmsTypeId: x.pmsTypeId || '' }; }),
       roomCount: types.reduce(function (s, x) { return s + Number(x.qty); }, 0),
       nights: Math.max(1, Math.round((new Date(o.checkOut) - new Date(o.checkIn)) / 86400000)),
       price: o.price == null ? '' : o.price,
@@ -6463,7 +6463,9 @@ window.Sales = (function () {
       if (o[k] !== undefined) patch[k] = o[k];
     });
     if (o.roomTypes) {
-      patch.roomTypes = o.roomTypes.filter(function (x) { return x && x.qty > 0; });
+      patch.roomTypes = o.roomTypes.filter(function (x) { return x && x.qty > 0; }).map(function (x) {
+        return { type: x.type, qty: Number(x.qty), pmsTypeId: x.pmsTypeId || '' };
+      });
       patch.roomCount = patch.roomTypes.reduce(function (s, x) { return s + Number(x.qty); }, 0);
     }
     if (o.breakfast !== undefined) { patch.breakfast = o.breakfast ? 1 : 0; patch.breakfastCount = Number(o.breakfastCount) || 0; }
@@ -10781,6 +10783,22 @@ window.Engine = (function () {
         });
       }
 
+      /* 销售客房预订是前厅连续工作：pending 要确认收到，received 要继续完成 PMS 预订。
+       * 不能只出现在通知/需要我处理里，否则“确认收到”后会从统一工作队列断链。 */
+      if (Policy.businessEnabled('sales', me.hotelId) && Policy.can(me, 'frontdesk')) {
+        DB.find('salesReservations', function (r) {
+          return AuthContext.inScope(r) && (r.status === 'pending' || r.status === 'received');
+        }).forEach(function (r) {
+          out.push({
+            id: 'salesReservation:' + r.id, refType: 'salesReservations', refId: r.id, kind: 'sales_reservation',
+            statusGroup: r.status === 'pending' ? 'confirm' : 'doing', priority: 'normal',
+            title: '客房预订 · ' + (r.customer || r.team || r.code),
+            subtitle: r.status === 'pending' ? '销售提交 · 待确认收到' : '前厅已收到 · 待完成 PMS 预订',
+            route: 'sales-reservation/' + r.id, dueAt: 0, createdAt: r.createdAt || 0
+          });
+        });
+      }
+
       /* 接班是前厅当前班次的即时工作，不应只藏在消息中心。 */
       DB.find('handovers', function (h) {
         return AuthContext.inScope(h) && h.toUserId === me.id && h.status === 'pending';
@@ -13767,7 +13785,7 @@ function staffEntries(u) {
     add('go-room-swap', '换房处理', '🔄', '#eaf1fd');
     if (Policy.businessEnabled('sales', u.hotelId)) add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
     if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-breakfast-forecast', '住客早餐', '🥐', '#e7f6ef');
-    add('go-guest', '住客需求', '🙋', '#eaf1fd');
+    add('go-guest', '客人需求', '🙋', '#eaf1fd');
     add('go-complaint', '客诉受理', '🙋', '#fdecec');
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
@@ -13778,7 +13796,7 @@ function staffEntries(u) {
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'purchase_food')) add('go-food-apply', '食材申购', '🥬', '#e7f6ef');
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'accept_food')) add('go-purchase', '食材验收', '📦', '#faf4e9');
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'purchase_eng')) add('go-apply', '维修物资', '🔧', '#f1f3f6');
-  if (Policy.can(u, 'dispatch_housekeeping')) add('go-guest-internal', '客房临时任务', '🧺', '#f0ecfd');
+  if (Policy.can(u, 'dispatch_housekeeping') && !Policy.can(u, 'frontdesk')) add('go-guest-internal', '客房临时任务', '🧺', '#f0ecfd');
   if (Policy.can(u, 'manage_recurring_task')) add('go-recurring', '周期任务', '🔁', '#eaf1fd');
   if (Policy.can(u, 'view_cost') && Policy.isSupervisor(u) && !Policy.can(u, 'sales')) add('go-cost', '运营成本', '💰', '#faf4e9');
 
@@ -13788,7 +13806,7 @@ function staffEntries(u) {
 function staffEntryGroups(u) {
   var ops = staffEntries(u);
   var core = Policy.can(u, 'frontdesk')
-    ? ['go-meal', 'go-breakfast-forecast', 'tm-new', 'go-handover'] : [];
+    ? ['go-meal', 'go-breakfast-forecast', 'tm-new', 'go-guest', 'go-handover'] : [];
   var primary = core.map(function (k) { return ops.find(function (o) { return o.k === k; }); }).filter(Boolean);
   var lowFrequency = ['go-catering-close-history'];
   var rest = ops.filter(function (o) { return core.indexOf(o.k) < 0 && lowFrequency.indexOf(o.k) < 0; });
@@ -20449,6 +20467,25 @@ App.act('mt-room-open', function (el) { App.go('mt-room-open/' + el.getAttribute
  * 前厅：确认收到 / 需补充信息 / 已完成预订
  * ====================================================================== */
 
+function salesBookingRoomTypes() {
+  var local = Space.roomTypes().filter(function (t) { return t.active !== 0; }).map(function (t) {
+    return { name: t.name, pmsTypeId: '', source: 'local' };
+  });
+  if (typeof PMS === 'undefined' || !Space.pmsReady() || !PMS.can('read.rooms')) return local;
+  var res = PMS.current().fetchRooms ? PMS.current().fetchRooms(PMS.cfg || {}) : null;
+  if (!res || !res.ok || !Array.isArray(res.data)) return local;
+  var map = {};
+  (PMS.typeMap ? PMS.typeMap() : []).forEach(function (x) { map[x.roomType] = x.externalId || ''; });
+  var names = [];
+  res.data.forEach(function (r) {
+    var n = r.roomType || '';
+    if (n && names.indexOf(n) < 0) names.push(n);
+  });
+  return names.length ? names.map(function (n) {
+    return { name: n, pmsTypeId: map[n] || '', source: 'pms' };
+  }) : local;
+}
+
 App.page('sales', {
   title: '销售工作台',
   render: function () {
@@ -20553,7 +20590,8 @@ App.page('sl-new', {
   title: '客房预订报备',
   render: function () {
     var f = _slForm;
-    var types = Space.roomTypes().filter(function (t) { return t.active !== 0; });
+    var types = salesBookingRoomTypes();
+    var usingPmsTypes = types.some(function (t) { return t.source === 'pms'; });
     var html = '<div class="card mt12"><div class="card-title">预订信息</div>'
       + '<div class="field mt8"><div class="field-label">客户/团队</div><input class="inp" id="sl-cust" placeholder="必填，如：XX旅行社" style="text-align:left"></div>'
       + '<div class="field"><div class="field-label">联系人</div><input class="inp" id="sl-contact" placeholder="选填" style="text-align:left"></div>'
@@ -20565,13 +20603,15 @@ App.page('sl-new', {
     html += '<div class="card"><div class="card-head"><div class="card-title">房型与数量</div><div class="card-more">至少选 1 间</div></div>'
       + '<div class="list" style="margin:0">' + types.map(function (t) {
         var it = (f.roomTypes || []).filter(function (x) { return x.type === t.name; })[0];
-        return '<div class="li"><div class="grow"><div class="t-md">' + U.esc(t.name) + '</div></div>'
+        return '<div class="li"><div class="grow"><div class="t-md">' + U.esc(t.name) + '</div>'
+          + (t.pmsTypeId ? '<div class="t-xs c3 mt4">PMS房型 ' + U.esc(t.pmsTypeId) + '</div>' : '') + '</div>'
           + '<div class="row" style="gap:6px;flex:none">'
           + '<div class="btn btn-ghost btn-sm" data-act="sl-qty" data-t="' + U.esc(t.name) + '" data-v="-1">−</div>'
           + '<div class="t-md t-w6" style="min-width:22px;text-align:center">' + (it ? it.qty : 0) + '</div>'
           + '<div class="btn btn-ghost btn-sm" data-act="sl-qty" data-t="' + U.esc(t.name) + '" data-v="1">＋</div>'
           + '</div></div>';
       }).join('') + '</div>'
+      + '<div class="t-xs c3 mt8">' + (usingPmsTypes ? '房型来自已接入 PMS；销售不可另造房型。' : '房型来自门店初始化配置；可在“空间与运营规则”中维护。') + '</div>'
       + '<div class="field"><div class="field-label">协议价</div><input class="inp" id="sl-price" placeholder="选填，如 328/间夜" style="text-align:left"></div>'
       + '<div class="row-b mt8"><div class="t-md">早餐</div>'
       + '<div class="btn ' + (f.breakfast ? 'btn-primary' : 'btn-ghost') + ' btn-sm" data-act="sl-bf">' + (f.breakfast ? '含早餐' : '不含') + '</div></div>'
@@ -20589,7 +20629,10 @@ App.act('sl-qty', function (el) {
   var t = el.getAttribute('data-t'), v = +el.getAttribute('data-v');
   _slForm.roomTypes = _slForm.roomTypes || [];
   var it = _slForm.roomTypes.filter(function (x) { return x.type === t; })[0];
-  if (!it) { it = { type: t, qty: 0 }; _slForm.roomTypes.push(it); }
+  if (!it) {
+    var def = salesBookingRoomTypes().filter(function (x) { return x.name === t; })[0] || {};
+    it = { type: t, qty: 0, pmsTypeId: def.pmsTypeId || '' }; _slForm.roomTypes.push(it);
+  }
   it.qty = Math.max(0, it.qty + v);
   if (!it.qty) _slForm.roomTypes = _slForm.roomTypes.filter(function (x) { return x.type !== t; });
   App.refresh();
@@ -20613,6 +20656,39 @@ App.act('sl-submit', function () {
   DB.flush();
   if (!res.ok) { U.toast(res.reason || '提交失败'); return; }
   U.toast('已提交，前厅会确认并回传结果'); App.go('sales');
+});
+
+App.page('sales-reservation', {
+  title: '客房预订详情',
+  render: function (r) {
+    var x = DB.byId('salesReservations', r.arg);
+    if (!x || !AuthContext.inScope(x)) return Comp.empty('预订记录不存在', '🛏');
+    var me = Engine.Session.user(), isFO = Policy.can(me, 'frontdesk'), isSales = Policy.can(me, 'sales');
+    if (!isFO && !isSales) return Comp.empty('无权查看该预订', '🔒');
+    var html = '<div class="card mt12"><div class="row-b"><div class="t-lg t-w6">' + U.esc(x.customer || x.team || '客房预订') + '</div>'
+      + '<span class="chip chip-' + Sales.stCls(x.status) + '">' + Sales.stName(x.status) + '</span></div>'
+      + '<div class="t-xs c3 mt8">' + U.esc(x.code) + ' · ' + U.esc(x.checkIn) + ' 至 ' + U.esc(x.checkOut) + '</div>'
+      + '<div class="t-sm mt12">' + U.esc((x.roomTypes || []).map(function (t) { return t.type + '×' + t.qty; }).join('、')) + '</div>'
+      + (x.breakfast ? '<div class="t-xs c3 mt8">含早餐 ' + (x.breakfastCount || x.roomCount || 0) + ' 份</div>' : '')
+      + (x.contact || x.phone ? '<div class="t-xs c3 mt8">联系人：' + U.esc(x.contact || '—') + ' ' + U.esc(x.phone || '') + '</div>' : '')
+      + (x.requirement ? '<div class="t-xs c3 mt8">要求：' + U.esc(x.requirement) + '</div>' : '')
+      + '</div>';
+    html += '<div class="card"><div class="card-title">处理进度</div>'
+      + '<div class="t-xs c3 mt8">销售提交：' + U.esc(x.salesName || DB.userName(x.salesId)) + ' · ' + U.mdhm(x.createdAt) + '</div>'
+      + (x.foAt ? '<div class="t-xs c3 mt8">前厅最近处理：' + U.esc(x.foByName || DB.userName(x.foBy)) + ' · ' + U.mdhm(x.foAt) + '</div>' : '')
+      + (x.foNote ? '<div class="t-xs c3 mt8">前厅备注：' + U.esc(x.foNote) + '</div>' : '')
+      + (x.pmsRef ? '<div class="t-xs c3 mt8">PMS预订号：' + U.esc(x.pmsRef) + '</div>' : '')
+      + '</div>';
+    if (isFO && x.status === 'pending') {
+      html += '<div class="btn btn-primary btn-block" data-act="sl-fo" data-id="' + x.id + '" data-k="received">确认收到</div>'
+        + '<div class="btn btn-ghost btn-block mt8" data-act="sl-fo" data-id="' + x.id + '" data-k="needinfo">需补充信息</div>';
+    } else if (isFO && x.status === 'received') {
+      html += '<div class="notice">下一步：在 PMS / 门店预订系统完成真实预订，然后回这里登记结果。</div>'
+        + '<div class="btn btn-primary btn-block mt12" data-act="sl-fo" data-id="' + x.id + '" data-k="booked">完成 PMS 预订</div>'
+        + '<div class="btn btn-ghost btn-block mt8" data-act="sl-fo" data-id="' + x.id + '" data-k="needinfo">需补充信息</div>';
+    }
+    return html;
+  }
 });
 
 /* ---------------- 前厅确认 ---------------- */
@@ -20643,7 +20719,9 @@ App.act('sl-fo-go', function (el) {
     pmsRef: (document.getElementById('sl-pms') || {}).value || ''
   });
   DB.flush(); App.closeSheet();
-  U.toast(res.ok ? '已回传给销售' : (res.reason || '')); App.refresh();
+  if (!res.ok) { U.toast(res.reason || '处理失败'); return; }
+  U.toast(el.getAttribute('data-k') === 'received' ? '已确认收到，继续完成 PMS 预订' : '已回传给销售');
+  App.go('sales-reservation/' + el.getAttribute('data-id'));
 });
 App.act('sl-cancel', function (el) {
   Sales.cancel(el.getAttribute('data-id'), '销售取消');
