@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 19:30 · 餐饮验收回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 19:45 · 餐饮验收记录修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -20856,16 +20856,21 @@ App.page('catering-close-history', {
     if (!Breakfast.canActual(me) && !Policy.can(me, 'meal_actual')) return Comp.empty('没有餐饮验收记录权限', '🔒');
     var html = '';
     if (Breakfast.canActual(me)) {
-      var bs = Breakfast.summary(14), bh = Breakfast.history(U.ymd(), 14);
+      var scope = AuthContext.scope();
+      var fromDate = U.ymd(Date.now() - 13 * 86400000);
+      var bh = DB.find('breakfastDays', function (d) {
+        return d.hotelId === scope.hotelId && d.tenantId === scope.tenantId && d.date >= fromDate && d.date <= U.ymd();
+      }).sort(function (a, b) { return a.date < b.date ? 1 : -1; });
+      var sumActual = bh.reduce(function (n, d) { return n + (d.actualAt ? Number(d.actual || 0) : 0); }, 0);
       html += '<div class="card mt12"><div class="card-title">住客早餐 · 近14天</div>'
         + '<div class="t-xs c3 mt8">预计与实际分开保留；点击“住客早餐验收”可查看当天详情。</div>'
         + '<div class="mt12"><table class="mini-table"><tr><th>日期</th><th class="num">最终预计</th><th class="num">实际</th><th class="num">差异</th></tr>'
         + bh.map(function (d) {
           var df = Breakfast.diffOf(d);
           return '<tr><td>' + U.esc(d.date) + '</td><td class="num">' + (d.finalForecast || 0) + '</td><td class="num">'
-            + (d.actualAt ? d.actual : '—') + '</td><td class="num">' + (d.actualAt ? ((df.finalDiff > 0 ? '+' : '') + df.finalDiff) : '—') + '</td></tr>';
+            + (d.actualAt ? d.actual : '—') + '</td><td class="num">' + (d.actualAt && df ? ((df.finalDiff > 0 ? '+' : '') + df.finalDiff) : '—') + '</td></tr>';
         }).join('') + '</table></div>'
-        + '<div class="t-xs c3 mt12">实际合计 ' + bs.sumActual + ' 人次。</div></div>';
+        + '<div class="t-xs c3 mt12">实际合计 ' + sumActual + ' 人次。</div></div>';
     }
     if (Policy.can(me, 'meal_actual')) {
       var ms = Engine.Stats.meal(Engine.Stats.range('7'));
