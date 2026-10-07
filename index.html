@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 16:57 · DEV-002 前厅入口与餐饮回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 17:49 · Issue #24 静默验收与前厅交接版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -818,8 +818,9 @@ window.U = (function () {
  * ========================================================================== */
 window.DB = (function () {
 
-  var KEY = 'hotel_ops_db_v1';
-  var KEY_USER = 'hotel_ops_current_user';
+  /* 验收静默版使用独立存储，保留正式/旧验收数据，不自动清空它们。 */
+  var KEY = window.__ACCEPTANCE_SINGLE_FILE__ ? 'hotel_ops_uat_quiet_v1' : 'hotel_ops_db_v1';
+  var KEY_USER = window.__ACCEPTANCE_SINGLE_FILE__ ? 'hotel_ops_uat_quiet_user_v1' : 'hotel_ops_current_user';
   var data = null;
 
   /* 全部业务表 */
@@ -10191,18 +10192,28 @@ window.Engine = (function () {
     nextShift: function (shift) {
       return shift === '早班' ? '中班' : (shift === '中班' ? '夜班' : '早班');
     },
+    /* 表单计数和提交使用同一结果，不把共享池/已关闭事项算作前厅个人交接。 */
+    tasksFor: function (userId) {
+      var open = Task.mine(userId), user = DB.byId('users', userId);
+      if (user && user.deptId === 'd_fo') open = open.filter(function (t) {
+        return (t.assigneeId === userId || (!t.assigneeId && t.claimBy === userId))
+          && ['done','closed','canceled'].indexOf(t.status) < 0;
+      });
+      return open;
+    },
     submit: function (p) {
       p = p || {};
       var me = Session.me;
       if (!me) return Policy.fail('请先登录');
       var to = DB.byId('users', p.toUserId || '');
-      if (!to || to.deptId !== me.deptId || to.id === me.id) return Policy.fail('请选择本部门下一班接收人');
+      if (!to || !AuthContext.inScope(to) || to.deptId !== me.deptId || to.id === me.id
+        || to.subjectType !== 'hotel' || (to.status || 'active') === 'leave') return Policy.fail('请选择本部门下一班接收人');
       var checks = p.checks || {};
       /* 前厅三项是交班底线事实，不把日常服务动作做成冗长打勾表。 */
       if (me.deptId === 'd_fo' && !(checks.cards && checks.cash && checks.roomState)) {
         return Policy.fail('交班前请确认房卡、备用金、房态/制卡三项已核对');
       }
-      var open = Task.mine(me.id);
+      var open = Handover.tasksFor(me.id);
       var lines = (p.items || []).map(function (x) { return String(x || '').trim(); }).filter(Boolean);
       if (!lines.length && p.unfinished) {
         lines = String(p.unfinished).split(/\n|；|;/).map(function (x) { return x.trim(); }).filter(Boolean);
@@ -10236,7 +10247,42 @@ window.Engine = (function () {
       var h = Handover.get(id), me = Session.me;
       if (!h) return Policy.fail('交接记录不存在');
       if (!me || (h.toUserId !== me.id && !Policy.can(me, 'manage_org'))) return Policy.fail('只有指定接班人可以确认接收');
-      if (h.status === 'accepted' || h.status === 'done') return Policy.ok({ handover: h, repeat: true });
+      var guard = ServiceGuard.check({ record: h, action: 'handover.write', scope: 'task', write: true });
+      if (!guard.ok) return guard;
+      if (h.status === 'done') return Policy.ok({ handover: h, repeat: true });
+      /* Issue #24 仅修复前厅承接；其它部门已稳定交接路径保持原样。 */
+      if (h.deptId === 'd_fo') {
+        var receiver = DB.byId('users', h.toUserId);
+        if (!receiver || !AuthContext.inScope(receiver) || receiver.deptId !== h.deptId
+          || receiver.subjectType !== 'hotel' || (receiver.status || 'active') === 'leave') return Policy.fail('接班人不在当前门店或已停用');
+        var tasks = [];
+        var invalid = (h.taskIds || []).some(function (tid) {
+          var t = DB.byId('tasks', tid);
+          if (!t) return false;
+          if (!AuthContext.inScope(t)) return true;
+          if (['done','closed','canceled'].indexOf(t.status) >= 0) return false;
+          /* 提交后已显式转交给其他执行人的任务，不重复抢回。 */
+          if (t.assigneeId !== h.userId && (t.assigneeId || t.claimBy !== h.userId)) return false;
+          if (t.poolCap && !Policy.can(receiver, t.poolCap)) return true;
+          if (!tasks.some(function (x) { return x.id === t.id; })) tasks.push(t);
+          return false;
+        });
+        if (invalid) return Policy.fail('交接任务超出门店范围或接班人缺少处理能力');
+        tasks.forEach(function (t) {
+          var at = Date.now();
+          DB.update('tasks', t.id, {
+            assigneeId: receiver.id, claimBy: receiver.id, claimAt: at,
+            lockVer: (t.lockVer || 0) + 1, snapAssignee: Snapshot.of(receiver.id),
+            transferHistory: (t.transferHistory || []).concat([{
+              from: t.assigneeId || t.claimBy, to: receiver.id, operator: me.id,
+              fromSnapshot: t.snapAssignee || Snapshot.of(h.userId), toSnapshot: Snapshot.of(receiver.id),
+              handoverId: h.id, shift: h.shift, nextShift: h.nextShift, at: at, reason: '接收交接班'
+            }])
+          });
+          Task.addStep(t.id, '交接班 ' + h.shift + ' → ' + h.nextShift + '：' + DB.userName(h.userId) + ' 移交给 ' + receiver.name, me.id);
+        });
+      }
+      if (h.status === 'accepted') return Policy.ok({ handover: h, repeat: true });
       DB.update('handovers', id, { status: 'accepted', acceptedAt: Date.now(), acceptedBy: me.id, updatedAt: Date.now() });
       notify(h.userId, { type: 'info', title: '交接已接收', content: DB.userName(me.id) + ' 已确认接收 ' + h.shift + ' 交接', refType: 'handover', refId: id });
       log('接收交接班', id);
@@ -13639,13 +13685,27 @@ function staffEntryGroups(u) {
     ? ['go-meal', 'go-breakfast-forecast', 'tm-new', 'go-handover'] : [];
   var primary = core.map(function (k) { return ops.find(function (o) { return o.k === k; }); }).filter(Boolean);
   var rest = ops.filter(function (o) { return core.indexOf(o.k) < 0; });
+  var extra = [];
+  /* 前厅主管仅叠加低频管理入口，去重后统一收进更多业务。 */
+  if (core.length && Policy.isSupervisor(u)) {
+    var management = [
+      { k: 'go-coordinate', n: '跨部门协作', i: '📨', bg: '#eaf1fd' },
+      { k: 'go-sop', n: '定时任务', i: '⏰', bg: '#f0ecfd' },
+      { k: 'open-incident', n: '异常中心', i: '⚠️', bg: '#fdecec' }
+    ];
+    if (Policy.can(u, 'approve_purchase') || Engine.Purchase.pendingFor(u.id).length) management.push({ k: 'open-approval', n: '待我审批', i: '🧾', bg: '#faf4e9' });
+    if (Policy.can(u, 'view_stats')) management.push({ k: 'go-stats', n: '数据', i: '📊', bg: '#f1f3f6' });
+    if (Engine.Purchase.kindsFor(u.id).length) management.push({ k: 'go-purchase', n: '采购台账', i: '🛒', bg: '#f0ecfd' });
+    management.forEach(function (o) { if (!ops.some(function (x) { return x.k === o.k; })) extra.push(o); });
+  }
   var count = Math.max(0, 6 - primary.length);
-  return { primary: primary.concat(rest.slice(0, count)), more: rest.slice(count) };
+  return { primary: primary.concat(rest.slice(0, count)), more: rest.slice(count).concat(extra) };
 }
 /* ==========================================================================
  * 部门负责人首页
  * ======================================================================= */
 function homeManager(me) {
+  if (Policy.can(me, 'frontdesk')) return homeStaff(me);
   if (me.deptId !== 'd_hk') return homeManagerLegacy(me);
   var deptId = me.deptId;
   var allToday = Engine.Task.todayAll().filter(function (t) { return t.deptId === deptId; });
@@ -17328,7 +17388,7 @@ App.page('handover', {
   render: function () {
     var me = Engine.Session.user();
     var isFO = me.deptId === 'd_fo';
-    var open = Engine.Task.mine(me.id);
+    var open = Engine.Handover.tasksFor(me.id);
     var incoming = Engine.Handover.latest(me.deptId).filter(function (h) {
       return h.toUserId === me.id && h.status !== 'done';
     });
@@ -22071,6 +22131,34 @@ App.act('cost-drill', function (el) {
 });
 </script>
 <script>
+/* 仅由 acceptance build 在 App.start 前注入，正式 index.html 不加载。 */
+(function () {
+  if (!window.__ACCEPTANCE_SINGLE_FILE__) return;
+  window.__UAT_QUIET_MODE__ = true;
+
+  /* 保留 seed 的组织、角色、能力和配置，只让本验收命名空间从无演示交易开始。
+   * 旧 localStorage 完整保留；后续刷新不重置，只有用户确认重置才重新建此基线。 */
+  var buildSeed = Seed.build;
+  Seed.build = function () {
+    var data = buildSeed();
+    ['inspections', 'tasks', 'workOrders', 'mealReports', 'mealDays', 'purchases',
+      'invRecords', 'handovers', 'complaints', 'decisions', 'devAccess', 'orgChanges',
+      'incidents', 'notifications', 'attachments', 'logs'].forEach(function (table) { data[table] = []; });
+    return data;
+  };
+
+  /* 只替换本验收构建的自动运行入口；手工业务服务、正式调度实现保持原样。 */
+  Engine.boot = function () {};
+  Engine.Inspection.ensureToday = function () {};
+  Engine.Escalate.tick = function () { return false; };
+  Recurring.generateDue = function () { return []; };
+  Maintenance.generateDue = function () { return []; };
+  GuestReq.escalate = function () { return 0; };
+  Pool.reclaim = function () { return 0; };
+})();
+
+</script>
+<script>
 /* 单文件所有模块均已注册，先启动正式 App，再启动验收控制层。 */
 if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", App.start, {once:true}); else App.start();
 </script>
@@ -22208,7 +22296,7 @@ function acceptanceBoot() {
 
   var bar = document.createElement('div');
   bar.className = 'acceptance-bar';
-  bar.innerHTML = '<div><b>人工验收测试版</b><span>验收数据保存在当前浏览器；需要重新开始时可一键重置</span></div>'
+  bar.innerHTML = '<div><b>人工验收测试版 · UAT 静默模式</b><span>定时任务/超时提醒已静默；独立验收数据保留，确认重置可恢复干净初始状态</span></div>'
     + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button id="acceptance-reset" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">重置验收数据</button>'
     + '<button id="acceptance-pms-checkout" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">模拟 PMS 退房</button>'
     + '<button id="acceptance-inspection-eng" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试查房→工程</button>'
@@ -22361,7 +22449,7 @@ function acceptanceBoot() {
   });
 
   resetBtn.addEventListener('click', function () {
-    if (!window.confirm('确认重置人工验收数据？当前浏览器里本轮验收产生的任务、消息和操作记录会清空，然后恢复到干净验收基线。')) return;
+    if (!window.confirm('确认重置静默验收区？本轮任务、消息和操作记录会清空并恢复干净基线；旧版验收和正式数据保留。')) return;
     var restoreUser = select.value || 'u_3';
     try {
       DB.reset();
