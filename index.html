@@ -12016,6 +12016,10 @@ window.GuestReq = (function () {
     if (!u) return [];
     var isGMish = Policy.can(u, 'manage_org') || (u.roles || []).indexOf('gm') >= 0;
     return all({ open: true }).filter(function (r) {
+      /* 客人自己扫码的轻量送物需求允许前厅与客房竞争接单；
+       * 前厅自己代客发起的派单仍只由目标执行部门处理。 */
+      if (r.source === 'guest_qr' && r.status === 'pending' && r.taskId
+          && r.guestRequestType !== 'clean' && Policy.can(u, 'frontdesk')) return true;
       if (r.taskId || r.workOrderId) return false;
       if (r.currentOwnerId === userId) return true;
       if (isGMish) return true;
@@ -22218,6 +22222,16 @@ App.page('guest-request', {
       + (x.result ? '<div class="t-xs c3 mt8">结果：' + U.esc(x.result) + '</div>' : '')
       + (x.transferNote ? '<div class="t-xs c3 mt8">转办：' + U.esc(x.transferNote) + '</div>' : '')
       + '</div>';
+    var me = Engine.Session.user();
+    var canFrontdeskClaimQr = x.source === 'guest_qr' && x.status === 'pending'
+      && x.taskId && x.guestRequestType !== 'clean' && Policy.can(me, 'frontdesk');
+    var canFinishOwned = x.status === 'doing' && x.currentOwnerId === me.id;
+    if (canFrontdeskClaimQr || canFinishOwned) {
+      html += '<div class="card"><div class="card-title">当前操作</div>'
+        + (canFrontdeskClaimQr ? '<div class="btn btn-primary btn-block" data-act="gq-take" data-id="' + x.id + '">接单处理</div>' : '')
+        + (canFinishOwned ? '<div class="btn btn-green btn-block" data-act="gq-done" data-id="' + x.id + '">完成需求</div>' : '')
+        + '</div>';
+    }
     if (x.taskId) {
       var t = DB.byId('tasks', x.taskId);
       if (t) html += '<div class="card"><div class="card-title">关联任务</div><div class="li" data-act="open-task" data-id="' + t.id + '">'
