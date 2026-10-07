@@ -25,12 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Refresh latest HotelOps acceptance build
-        run: |
-          curl -L --fail --retry 3 \
-            "https://raw.githubusercontent.com/shawashi/hotel/main/artifacts/hotel-ops-%E9%AA%8C%E6%94%B6%E6%B5%8B%E8%AF%95%E7%89%88.html" \
-            -o index.html
-          test -s index.html
       - uses: actions/configure-pages@v5
         with:
           enablement: true
