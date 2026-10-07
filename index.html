@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 17:49 · Issue #24 静默验收与前厅交接版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 18:42 · Issue #24 静默验收与前厅交接版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -13668,7 +13668,8 @@ function staffEntries(u) {
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
 
-  /* 餐饮岗位不再放“餐饮工作台”；具体早餐/团餐从“我的工作”或消息直达。 */
+  /* 餐饮岗位不再放笼统“餐饮工作台”；收尾岗位必须有明确的住客早餐验收入口。 */
+  if (Policy.businessEnabled('guest_breakfast', u.hotelId) && Breakfast.canActual(u)) add('go-breakfast-close', '住客早餐验收', '🥐', '#e7f6ef');
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'purchase_food')) add('go-food-apply', '食材申购', '🥬', '#e7f6ef');
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'accept_food')) add('go-purchase', '食材验收', '📦', '#faf4e9');
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'purchase_eng')) add('go-apply', '维修物资', '🔧', '#f1f3f6');
@@ -14111,6 +14112,7 @@ App.act('mywork-open', function (el) {
 });
 
 App.act('go-breakfast-forecast', function () { App.go('breakfast-forecast'); });
+App.act('go-breakfast-close', function () { App.go('breakfast-item/' + U.ymd()); });
 
 </script>
 <script>
@@ -20816,8 +20818,11 @@ App.page('breakfast-item', {
   render: function (r) {
     var d = Breakfast.day(r.arg || U.ymd(), false), me = Engine.Session.user();
     if (!d) return Comp.empty('当前没有早餐事项', '🥐');
+    var hist = Breakfast.history(d.date), latest = hist.length ? hist[hist.length - 1] : null;
+    var change = latest && latest.from !== 0 ? (latest.to - latest.from) : 0;
     var html = '<div class="card mt12"><div class="card-title">' + U.esc(d.date) + ' 早餐</div>'
       + '<div class="t-xl t-w6 mt12">预计 ' + (d.finalForecast || 0) + ' 人</div>'
+      + (latest && latest.from !== 0 ? '<div class="t-sm mt8" style="color:var(--orange)">最近修订：' + latest.from + ' → ' + latest.to + ' 人（' + (change > 0 ? '+' : '') + change + '）</div><div class="t-xs c3 mt8">' + U.esc(latest.byName || DB.userName(latest.by)) + ' · ' + U.esc(U.relTime(latest.at)) + '</div>' : '')
       + (d.ackAt ? '<div class="t-xs c3 mt8">已确认：' + U.esc(d.ackByName || DB.userName(d.ackBy)) + '</div>' : '<div class="t-xs c3 mt8">待厨师确认</div>')
       + '</div>';
     if (d.firstAt && !d.ackAt && Policy.can(me, 'catering_ack')) html += '<div class="btn btn-primary btn-block" data-act="bf-ack" data-date="' + d.date + '">确认已知悉</div>';
@@ -22301,6 +22306,7 @@ function acceptanceBoot() {
     + '<button id="acceptance-pms-checkout" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">模拟 PMS 退房</button>'
     + '<button id="acceptance-inspection-eng" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试查房→工程</button>'
     + '<button id="acceptance-reclean" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试维修后复洁</button>'
+    + '<button id="acceptance-breakfast-close" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试早餐验收</button>'
     + '<label>测试身份 <select id="acceptance-role">'
     + AcceptanceTest.accounts.map(function (a) {
       return '<option value="' + a.id + '">' + U.esc(a.label) + '</option>';
@@ -22311,6 +22317,7 @@ function acceptanceBoot() {
   var pmsCheckoutBtn = document.getElementById('acceptance-pms-checkout');
   var inspectionEngBtn = document.getElementById('acceptance-inspection-eng');
   var recleanBtn = document.getElementById('acceptance-reclean');
+  var breakfastCloseBtn = document.getElementById('acceptance-breakfast-close');
   var resetUser = '';
   try { resetUser = sessionStorage.getItem('hotel_acceptance_reset_user') || ''; sessionStorage.removeItem('hotel_acceptance_reset_user'); } catch (e) {}
   if (resetUser && DB.byId('users', resetUser)) {
@@ -22446,6 +22453,51 @@ function acceptanceBoot() {
     Engine.Session.set('u_9'); Engine.boot(); select.value = 'u_9'; syncAcceptanceControls();
     App.go('wo/' + wo.id); App.refresh();
     U.toast(roomNo + ' 房复洁场景已生成；当前已切换吴国庆，可直接完成维修');
+  });
+
+
+  breakfastCloseBtn.addEventListener('click', function () {
+    var today = U.ymd(), tomorrow = U.ymd(Date.now() + 86400000);
+    var src = Breakfast.day(tomorrow, false);
+    if (!src || !src.firstAt) {
+      window.alert('没有可用于早餐验收的明日预计。请先以前厅身份录入明日住客早餐预计。');
+      return;
+    }
+    var cur = Breakfast.day(today, false), now = Date.now();
+    if (!cur) {
+      cur = DB.insert('breakfastDays', AuthContext.stamp({
+        id: U.uid('bf'), date: today,
+        firstForecast: src.firstForecast || src.finalForecast || 0,
+        firstBy: src.firstBy || 'u_3', firstAt: src.firstAt || now,
+        finalForecast: src.finalForecast || 0,
+        actual: 0, actualBy: '', actualAt: 0,
+        status: 'waitActual', pmsRef: src.pmsRef || 0,
+        note: src.note || '', detail: Object.assign({}, src.detail || {}), leftoverPhotos: [],
+        ackAt: src.ackAt || now, ackBy: src.ackBy || 'u_12', ackByName: src.ackByName || DB.userName(src.ackBy || 'u_12'),
+        createdAt: now, updatedAt: now
+      }));
+      var hs = Breakfast.history(tomorrow);
+      hs.forEach(function (h, i) {
+        DB.insert('breakfastForecasts', AuthContext.stamp({
+          id: U.uid('bff'), dayId: cur.id, date: today, seq: i + 1,
+          from: h.from, to: h.to, by: h.by, byName: h.byName,
+          snap: h.snap || Engine.Snapshot.of(h.by), at: h.at || now,
+          reason: h.reason || '', source: 'uat_copy'
+        }));
+      });
+    } else {
+      DB.update('breakfastDays', cur.id, {
+        firstForecast: src.firstForecast || src.finalForecast || 0,
+        firstBy: src.firstBy || 'u_3', firstAt: cur.firstAt || src.firstAt || now,
+        finalForecast: src.finalForecast || 0,
+        actual: 0, actualBy: '', actualAt: 0, leftoverPhotos: [], status: 'waitActual',
+        ackAt: src.ackAt || now, ackBy: src.ackBy || 'u_12', ackByName: src.ackByName || DB.userName(src.ackBy || 'u_12'), updatedAt: now
+      });
+    }
+    DB.flush();
+    Engine.Session.set('u_17'); Engine.boot(); select.value = 'u_17'; syncAcceptanceControls();
+    App.go('breakfast-item/' + today); App.refresh();
+    U.toast('已准备今日早餐验收场景，并切换到厨工');
   });
 
   resetBtn.addEventListener('click', function () {
