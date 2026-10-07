@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 20:00 · 餐饮记录下钻版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 20:12 · 全局留痕与已完成记录回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -10733,8 +10733,12 @@ window.Engine = (function () {
         var md = DB.findOne('mealDays', function (x) {
           return x.date === U.ymd() && x.hotelId === scope.hotelId && x.tenantId === scope.tenantId;
         }) || {};
-        var needLunchActual = Number(md.lunchExpect || 0) > 0 && !md.lunchActualAt;
-        var needDinnerActual = Number(md.dinnerExpect || 0) > 0 && !md.dinnerActualAt;
+        /* 员工餐预计人数的事实来源是员工本人当天申报 mealReports，不能依赖 mealDays 里的旧快照字段。
+         * 这样既保证预计0不产生噪音待办，也保证确有申报时厨工/缺岗兜底能看到收尾任务。 */
+        var lunchExpectNow = reports.filter(function (m) { return m.lunch === 1; }).length;
+        var dinnerExpectNow = reports.filter(function (m) { return m.dinner === 1; }).length;
+        var needLunchActual = lunchExpectNow > 0 && !md.lunchActualAt;
+        var needDinnerActual = dinnerExpectNow > 0 && !md.dinnerActualAt;
         if (reports.length && (needLunchActual || needDinnerActual)) {
           var pendingMeals = [];
           if (needLunchActual) pendingMeals.push('午餐');
@@ -10807,6 +10811,56 @@ window.Engine = (function () {
         if (prio) return prio;
         return (b.createdAt || 0) - (a.createdAt || 0);
       });
+    },
+    history: function (userId) {
+      var me = DB.byId('users', userId || (Session.me && Session.me.id));
+      if (!me || !AuthContext.checkScope(me).ok) return [];
+      var scope = AuthContext.scope(), out = [];
+      DB.find('roomInsp', function (x) {
+        return AuthContext.inScope(x) && x.inspectorId === me.id && !!x.endedAt;
+      }).forEach(function (x) {
+        if (x.taskId && DB.byId('tasks', x.taskId)) return;
+        var room = DB.byId('rooms', x.roomId);
+        out.push({ id: 'inspection:' + x.id, kind: 'inspection', title: (room ? room.number : DB.roomNo(x.roomId)) + ' 房' + (x.kind === 'recheck' ? '复查' : '查房'), subtitle: (x.result === 'pass' ? '合格' : x.result === 'fail' ? '发现问题' : '已完成'), completedAt: x.endedAt, route: 'room/' + x.roomId });
+      });
+      DB.find('breakfastDays', function (d) {
+        return d.hotelId === scope.hotelId && d.tenantId === scope.tenantId && d.actualBy === me.id && !!d.actualAt;
+      }).forEach(function (d) {
+        out.push({ id: 'breakfast:' + d.id, kind: 'breakfast', title: '住客早餐收尾', subtitle: '预计 ' + d.finalForecast + ' 人 · 实际 ' + d.actual + ' 人', completedAt: d.actualAt, route: 'breakfast-item/' + d.date });
+      });
+      DB.find('mealDays', function (d) {
+        return d.hotelId === scope.hotelId && d.tenantId === scope.tenantId;
+      }).forEach(function (d) {
+        if (d.lunchActualBy === me.id && d.lunchActualAt) out.push({ id: 'meal-lunch:' + d.id, kind: 'meal', title: '员工餐午餐收尾', subtitle: '实际 ' + (d.lunchActual || 0) + ' 人', completedAt: d.lunchActualAt, route: 'catering-history-meal-detail/' + d.date });
+        if (d.dinnerActualBy === me.id && d.dinnerActualAt) out.push({ id: 'meal-dinner:' + d.id, kind: 'meal', title: '员工餐晚餐收尾', subtitle: '实际 ' + (d.dinnerActual || 0) + ' 人', completedAt: d.dinnerActualAt, route: 'catering-history-meal-detail/' + d.date });
+      });
+      DB.find('teamMeals', function (m) { return AuthContext.inScope(m); }).forEach(function (m) {
+        if (m.confirmedBy === me.id && m.confirmedAt) out.push({ id: 'team-confirm:' + m.id, kind: 'team_meal', title: '团餐确认 · ' + (m.team || m.code), subtitle: (m.date || '') + ' · ' + (m.peopleCount || 0) + ' 人', completedAt: m.confirmedAt, route: 'team-meal/' + m.id });
+        if (m.completedBy === me.id && m.completedAt) out.push({ id: 'team-close:' + m.id, kind: 'team_meal', title: '团餐收尾 · ' + (m.team || m.code), subtitle: '实际 ' + (m.actualCount || 0) + ' 人', completedAt: m.completedAt, route: 'team-meal/' + m.id });
+      });
+      DB.find('purchaseAcceptances', function (a) {
+        return AuthContext.inScope(a) && a.acceptorId === me.id && !!a.at;
+      }).forEach(function (a) {
+        var p = DB.byId('purchases', a.purchaseId);
+        out.push({ id: 'purchase-accept:' + a.id, kind: 'purchase', title: '采购验收 · ' + (p ? p.code : a.purchaseId), subtitle: a.result === 'pass' ? '验收合格' : '验收不合格', completedAt: a.at, route: 'purchase/' + a.purchaseId });
+      });
+      DB.find('handovers', function (h) {
+        return AuthContext.inScope(h) && h.acceptedBy === me.id && !!h.acceptedAt;
+      }).forEach(function (h) {
+        out.push({ id: 'handover:' + h.id, kind: 'handover', title: '接班确认 · ' + (h.shift || '交班'), subtitle: DB.userName(h.userId) + ' → ' + DB.userName(h.toUserId), completedAt: h.closedAt || h.acceptedAt, route: 'handover-detail/' + h.id });
+      });
+      DB.find('guestRequests', function (g) {
+        return AuthContext.inScope(g) && g.status === 'done' && g.currentOwnerId === me.id && !!g.completedAt;
+      }).forEach(function (g) {
+        out.push({ id: 'guest:' + g.id, kind: 'guest', title: '客人需求 · ' + (g.roomNo || '') + ' 房', subtitle: g.typeName || g.content || '已完成', completedAt: g.completedAt, route: 'guest-request/' + g.id });
+      });
+      DB.find('taskInstances', function (x) {
+        return AuthContext.inScope(x) && x.status === 'done' && x.actualAssigneeId === me.id && !!x.doneAt;
+      }).forEach(function (x) {
+        var rt = DB.byId('recurringTasks', x.recurringTaskId || x.templateId || x.ruleId);
+        out.push({ id: 'recurring:' + x.id, kind: 'recurring', title: (rt && rt.title) || x.title || '周期任务', subtitle: x.result || '已完成', completedAt: x.doneAt, route: 'recurring?tab=rule' });
+      });
+      return out.sort(function (a, b) { return (b.completedAt || 0) - (a.completedAt || 0); });
     },
     groups: function (userId) {
       var out = { waiting: [], paused: [], doing: [], confirm: [], temporary: [], alert: [] };
@@ -12946,23 +13000,67 @@ window.Comp = (function () {
     if (!u) return '';
     return '<div class="avatar ' + (cls || '') + '" style="background:' + U.avatarColor(u.name) + '">' + U.esc(U.initial(u.name)) + '</div>';
   }
+  var _photoSelections = {};
   function photos(arr) {
     arr = arr || [];
     if (!arr.length) return '';
     return '<div class="photo-grid mt8">' + arr.map(function (p) {
-      return '<div class="photo">🖼️</div>';
+      if (/^(data:image\/|blob:|https?:\/\/)/.test(String(p || ''))) {
+        return '<a class="photo" href="' + U.esc(String(p)) + '" target="_blank" rel="noopener" style="overflow:hidden;display:block">'
+          + '<img src="' + U.esc(String(p)) + '" alt="业务留痕照片" style="width:100%;height:100%;object-fit:cover;display:block"></a>';
+      }
+      return '<div class="photo" title="旧版照片标识，原图未留存">🖼️</div>';
     }).join('') + '</div>';
   }
 
-  /** 通用照片入口：所有业务统一提供“上传照片 / 拍照”两种来源。
-   * prefix 对应页面自己的动作前缀；验收版只模拟选择，真实小程序分别接相册/文件选择与相机能力。
+  function clearPhotos(prefix) { _photoSelections[prefix] = []; }
+  function photoValues(prefix) { return (_photoSelections[prefix] || []).slice(); }
+  function capturePhoto(prefix, countId, input) {
+    var files = Array.prototype.slice.call((input && input.files) || []);
+    if (!files.length) return;
+    _photoSelections[prefix] = _photoSelections[prefix] || [];
+    var pending = files.length;
+    function done() {
+      pending--;
+      var n = document.getElementById(countId);
+      if (n) n.textContent = (_photoSelections[prefix] || []).length;
+      if (!pending && input) input.value = '';
+    }
+    files.forEach(function (file) {
+      var rd = new FileReader();
+      rd.onload = function () {
+        var raw = rd.result;
+        if (!file.type || file.type.indexOf('image/') !== 0) {
+          _photoSelections[prefix].push(raw); done(); return;
+        }
+        var img = new Image();
+        img.onload = function () {
+          try {
+            var max = 1280, w = img.width, h = img.height, scale = Math.min(1, max / Math.max(w, h));
+            var cv = document.createElement('canvas');
+            cv.width = Math.max(1, Math.round(w * scale)); cv.height = Math.max(1, Math.round(h * scale));
+            cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+            _photoSelections[prefix].push(cv.toDataURL('image/jpeg', 0.78));
+          } catch (e) { _photoSelections[prefix].push(raw); }
+          done();
+        };
+        img.onerror = function () { _photoSelections[prefix].push(raw); done(); };
+        img.src = raw;
+      };
+      rd.onerror = done;
+      rd.readAsDataURL(file);
+    });
+  }
+
+  /** 验收环境直接保存真实图片 Data URL，确保“上传→完成→历史详情回看”可以闭环。
+   * 正式小程序接入对象存储时，只需把这里替换成上传后的受控文件 URL，业务记录结构无需改变。
    */
   function photoPicker(prefix, countId, count, note) {
-    count = Number(count) || 0;
+    count = Number(count) || ((_photoSelections[prefix] || []).length);
     return '<div class="mt12">'
       + '<div class="row" style="gap:8px">'
-      + '<div class="btn btn-ghost grow" data-act="' + prefix + '-upload">📁 上传照片</div>'
-      + '<div class="btn btn-ghost grow" data-act="' + prefix + '-camera">📷 拍照</div>'
+      + '<label class="btn btn-ghost grow" style="text-align:center">📁 上传照片<input type="file" accept="image/*" multiple style="display:none" onchange="Comp.capturePhoto(\'' + prefix + '\',\'' + countId + '\',this)"></label>'
+      + '<label class="btn btn-ghost grow" style="text-align:center">📷 拍照<input type="file" accept="image/*" capture="environment" style="display:none" onchange="Comp.capturePhoto(\'' + prefix + '\',\'' + countId + '\',this)"></label>'
       + '</div>'
       + '<div class="t-xs c3 mt8">' + (note ? U.esc(note) + ' · ' : '') + '已选择 <span id="' + countId + '">' + count + '</span> 张</div>'
       + '</div>';
@@ -13070,6 +13168,7 @@ window.Comp = (function () {
 
   return {
     empty: empty, sectionTitle: sectionTitle, kpi: kpi, bar: bar, avatar: avatar, photos: photos, photoPicker: photoPicker,
+    capturePhoto: capturePhoto, clearPhotos: clearPhotos, photoValues: photoValues,
     taskStatusChip: taskStatusChip, todoRow: todoRow, taskRow: taskRow, timeline: timeline,
     incidentRow: incidentRow, purchaseRow: purchaseRow, field: field, seg: seg,
     typeIcon: typeIcon, typeBg: typeBg
@@ -14153,13 +14252,11 @@ App.page('tasks', {
     var list = Engine.Task.query(opt);
     if (statusFilter === 'overdue') list = list.filter(Engine.Task.isOverdue);
     if (r.params.type) list = list.filter(function (t) { return t.type === r.params.type; });
-    /* “已完成”不仅要有普通任务，也要能追溯本人完成的房间查房。
-     * 查房记录存于 roomInsp，不应因为不是 tasks 记录就在任务中心消失。 */
-    var doneInspections = [];
-    if (tab === 'mine' && statusFilter === 'done') {
-      doneInspections = DB.find('roomInsp', function (x) {
-        return x.inspectorId === me.id && !!x.endedAt && AuthContext.inScope(x);
-      }).sort(function (a, b) { return b.endedAt - a.endedAt; });
+    /* “已完成”与“我的工作”必须同口径：非 tasks 业务（早餐/员工餐/团餐/采购验收/交接等）
+     * 完成后也要进入统一历史，不能从待办消失后无处可查。 */
+    var completedWork = [];
+    if (tab === 'mine' && statusFilter === 'done' && Engine.MyWork && Engine.MyWork.history) {
+      completedWork = Engine.MyWork.history(me.id);
     }
 
     /* “我的工作”使用 V1.1 聚合队列：维修、清扫、查房、采购验收、餐饮收尾等从一个入口进入。
@@ -14209,21 +14306,48 @@ App.page('tasks', {
       }).join('') + '</div>' : Comp.empty(statusFilter === 'checking' ? '暂无待确认/验收事项' : '当前没有需要处理的工作', '✅');
       if (workList.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条，共 ' + workList.length + ' 条</div>';
     } else {
-      if (doneInspections.length) {
-        html += '<div class="list">' + doneInspections.slice(0, 60).map(function (ins) {
-          var room = DB.byId('rooms', ins.roomId);
-          var result = ins.result === 'pass' ? '合格' : (ins.result === 'fail' ? '发现问题' : '已完成');
-          return '<div class="li" data-act="open-room" data-id="' + U.esc(ins.roomId) + '">'
-            + '<div class="grow"><div class="t-md t-w6">' + U.esc(room ? room.number : '') + ' 房'
-            + (ins.kind === 'recheck' ? '复查' : '查房') + ' <span class="chip chip-green">已完成</span></div>'
-            + '<div class="t-xs c3 mt8">' + U.esc(result) + ' · ' + U.hm(ins.endedAt)
-            + (ins.duration != null ? ' · 用时 ' + ins.duration + ' 分钟' : '') + '</div></div><div class="li-arrow">›</div></div>';
-        }).join('') + '</div>';
+      if (statusFilter === 'done') {
+        var doneRows = list.map(function (t) {
+          return {
+            key: 'task:' + t.id,
+            completedAt: t.completedAt || t.verifiedAt || t.updatedAt || t.createdAt || 0,
+            html: Comp.taskRow(t)
+          };
+        });
+        if (tab === 'mine') {
+          completedWork.forEach(function (w) {
+            doneRows.push({
+              key: w.id,
+              completedAt: w.completedAt || 0,
+              html: '<div class="li" data-act="task-mywork-open" data-route="' + U.esc(w.route || '') + '">'
+                + '<div class="grow"><div class="t-md t-w6">' + U.esc(w.title || '已完成事项')
+                + ' <span class="chip chip-green">已完成</span></div>'
+                + '<div class="t-xs c3 mt8">' + U.esc(w.subtitle || '')
+                + (w.completedAt ? ' · ' + U.mdhm(w.completedAt) : '') + '</div></div><div class="li-arrow">›</div></div>'
+            });
+          });
+        }
+        var seenDone = {};
+        doneRows = doneRows.filter(function (x) {
+          if (seenDone[x.key]) return false;
+          seenDone[x.key] = 1; return true;
+        }).sort(function (a, b) { return b.completedAt - a.completedAt; });
+
+        var firstDone = doneRows.slice(0, 5), moreDone = doneRows.slice(5, 60);
+        if (firstDone.length) html += '<div class="list">' + firstDone.map(function (x) { return x.html; }).join('') + '</div>';
+        if (moreDone.length) {
+          html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
+            + '<span class="t-md t-w6">查看更多已完成记录</span><span class="t-sm c3">' + moreDone.length + ' 条 ›</span></summary>'
+            + '<div class="list mt12">' + moreDone.map(function (x) { return x.html; }).join('') + '</div></details>';
+        }
+        if (!doneRows.length) html += Comp.empty('暂无已完成任务', '✅');
+        if (doneRows.length > 60) html += '<div class="t-sm c3 center mt12">历史较多，当前最多保留最近 60 条可展开记录</div>';
+      } else {
+        html += list.length
+          ? '<div class="list">' + list.slice(0, 60).map(Comp.taskRow).join('') + '</div>'
+          : Comp.empty('没有待处理任务', '✅');
+        if (list.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条记录</div>';
       }
-      html += list.length
-        ? '<div class="list">' + list.slice(0, 60).map(Comp.taskRow).join('') + '</div>'
-        : (!doneInspections.length ? Comp.empty(statusFilter === 'done' ? '暂无已完成任务' : '没有待处理任务', '✅') : '');
-      if (list.length > 60 || doneInspections.length > 60) html += '<div class="t-sm c3 center mt12">仅显示最近 60 条记录</div>';
     }
     return html;
   }
@@ -14403,6 +14527,38 @@ App.page('task', {
 
     if (t.photos && t.photos.length) {
       html += '<div class="card"><div class="card-title">现场照片</div>' + Comp.photos(t.photos) + '</div>';
+    }
+    if (isRoomCleanTask && (t.status === 'done' || t.status === 'closed')) {
+      var archivedCleans = DB.find('roomClean', function (x) { return x.taskId === t.id && !!x.endedAt && AuthContext.inScope(x); })
+        .sort(function (a, b) { return (b.endedAt || 0) - (a.endedAt || 0); });
+      archivedCleans.forEach(function (cl) {
+        html += '<div class="card"><div class="card-title">清扫执行记录</div>'
+          + '<div class="t-xs c3 mt8">清扫人：' + U.esc(DB.userName(cl.cleanerId) || cl.cleaner || '—') + '</div>'
+          + '<div class="t-xs c3 mt8">开始：' + U.mdhm(cl.startedAt) + ' · 完成：' + U.mdhm(cl.endedAt) + (cl.duration != null ? ' · 用时 ' + cl.duration + ' 分钟' : '') + '</div>'
+          + '<div class="t-sm mt8">结果：' + U.esc(cl.resultName || cl.result || '已完成') + '</div>'
+          + (cl.resultNote ? '<div class="t-xs c3 mt8">备注：' + U.esc(cl.resultNote) + '</div>' : '')
+          + ((cl.photos || []).length ? '<div class="t-xs c3 mt8">现场照片 ' + cl.photos.length + ' 张</div>' + Comp.photos(cl.photos) : '')
+          + '</div>';
+      });
+    }
+
+    if (isRoomInspectionTask && (t.status === 'done' || t.status === 'closed' || t.status === 'waitcheck')) {
+      var archivedInspections = DB.find('roomInsp', function (x) { return x.taskId === t.id && !!x.endedAt && AuthContext.inScope(x); })
+        .sort(function (a, b) { return (a.startedAt || 0) - (b.startedAt || 0); });
+      archivedInspections.forEach(function (insRec) {
+        var archivedIssues = DB.find('roomIssues', function (q) { return q.inspId === insRec.id && AuthContext.inScope(q); });
+        html += '<div class="card"><div class="card-title">' + (insRec.kind === 'recheck' ? '复查记录' : '查房记录') + '</div>'
+          + '<div class="t-xs c3 mt8">检查人：' + U.esc(DB.userName(insRec.inspectorId) || insRec.inspector || '—')
+          + ' · 开始 ' + U.mdhm(insRec.startedAt) + ' · 完成 ' + U.mdhm(insRec.endedAt) + '</div>'
+          + '<div class="t-sm mt8">结果：' + U.esc(insRec.result === 'pass' ? '合格' : (insRec.result === 'fail' ? '发现问题' : insRec.result || '已完成')) + '</div>'
+          + (insRec.note ? '<div class="t-xs c3 mt8">备注：' + U.esc(insRec.note) + '</div>' : '')
+          + ((insRec.photos || []).length ? '<div class="t-xs c3 mt8">查房照片 ' + insRec.photos.length + ' 张</div>' + Comp.photos(insRec.photos) : '')
+          + archivedIssues.map(function (q) {
+            return '<div class="notice mt12"><div class="t-sm t-w6">' + U.esc(q.cat || '问题') + ' · ' + U.esc(q.status || '') + '</div>'
+              + (q.note ? '<div class="t-xs c3 mt8">' + U.esc(q.note) + '</div>' : '')
+              + ((q.photos || []).length ? Comp.photos(q.photos) : '') + '</div>';
+          }).join('') + '</div>';
+      });
     }
 
     /* 巡检/SOP 清单 */
@@ -14654,7 +14810,7 @@ App.act('task-finish', function (el) {
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="finish-submit" data-id="' + id + '">确认完成</button>'
   });
-  window._finNormal = 1; window._finPhotos = [];
+  window._finNormal = 1; window._finPhotos = []; Comp.clearPhotos('finish-photo');
 });
 App.act('finish-pick', function (el) {
   var v = el.getAttribute('data-v');
@@ -14674,7 +14830,7 @@ App.act('finish-submit', function (el) {
   var id = el.getAttribute('data-id');
   var note = (document.getElementById('fin-note') || {}).value || '';
   var normal = window._finNormal !== 0;
-  var photos = (window._finPhotos || []).map(function (source, i) { return 'task_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('finish-photo');
   Engine.Task.finish(id, (normal ? '处理完成，一切正常' : '处理时发现异常，需跟进') + (note ? '：' + note : ''), photos);
   if (!normal) {
     Engine.Incident.raise({ type: 'task_abnormal', level: 'mid', title: '任务异常需跟进：' + (DB.byId('tasks', id) || {}).title, detail: note || '处理过程中发现异常', refType: 'task', refId: id });
@@ -14800,7 +14956,7 @@ App.page('report', {
     /* 3. 补充 */
     html += '<div class="sec-title">③ 补充说明（可以不填）</div>'
       + '<div class="card">'
-      + Comp.photoPicker('rp-photo', 'rp-ph-n', (_rp.photos || []).length, '现场照片可选')
+      + Comp.photoPicker('rp-photo', 'rp-ph-n', (Comp.photoValues('rp-photo') || []).length, '现场照片可选')
       + '<div class="row mt8" style="gap:10px">'
       + '<div class="btn btn-ghost grow" data-act="rp-voice">🎤 语音<span id="rp-vc-n">' + (_rp.voice ? _rp.voice + ' 秒' : '') + '</span></div>'
       + '</div>'
@@ -14924,7 +15080,7 @@ App.act('rp-submit', function () {
   if (!_rp.type) { U.toast('请选择问题类型'); return; }
   _rpSubmitting = true;
   _rp.desc = (document.getElementById('rp-desc') || {}).value || '';
-  var photos = (_rp.photos || []).map(function (source, i) { return 'report_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('rp-photo');
   var res = Engine.Report.submit({
     roomId: _rp.roomId, issueType: _rp.type, desc: _rp.desc || '',
     photos: photos, voiceSec: _rp.voice, equipId: _rp.equipId,
@@ -15191,12 +15347,12 @@ App.act('wo-finish', function (el) {
           + '<button data-act="mat-plus" data-id="' + it.id + '" data-p="' + it.price + '">＋</button></div></div>';
       }).join('') + '</div>'
       + '<div class="row-b mt12"><div class="t-md t-w6">耗材成本</div><div class="t-lg t-w6 c-orange" id="mat-total">' + U.money(0) + '</div></div></details>'
-      + Comp.photoPicker('wo-photo', 'wo-photo-n', (window._woPhotos || []).length, '完成后需留照片')
+      + Comp.photoPicker('wo-photo', 'wo-photo-n', 0, '完成后需留照片')
       + '</div>',
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="wo-finish-submit" data-id="' + id + '">提交完成</button>'
   });
-  window._mats = {}; window._woPhotos = []; window._woResult = '已修复，测试正常'; window._woNeedReclean = false;
+  window._mats = {}; window._woPhotos = []; Comp.clearPhotos('wo-photo'); window._woResult = '已修复，测试正常'; window._woNeedReclean = false;
 });
 App.act('wo-reclean', function (el) {
   window._woNeedReclean = el.getAttribute('data-v') === '1';
@@ -15245,7 +15401,7 @@ App.act('wo-finish-submit', function (el) {
     var it = DB.byId('inventory', k);
     if (it) mats.push({ name: it.name, qty: window._mats[k], unit: it.unit, price: it.price });
   });
-  var photos = (window._woPhotos || []).map(function (source, i) { return 'workorder_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('wo-photo');
   var w = DB.byId('workOrders', id);
   if (w) {
     w.materials = mats;
@@ -15418,13 +15574,14 @@ App.act('meal-actual', function (el) {
   var d = Engine.Meal.day();
   var expect = w === 'lunchActual' ? d.lunchExpect : d.dinnerExpect;
   _mealActualPhotos = [];
+  Comp.clearPhotos('meal-leftover-photo');
   App.sheet({
     title: (w === 'lunchActual' ? '午餐' : '晚餐') + '收尾',
     body: '<div class="pad" style="padding:8px 14px">'
       + '<div class="row-b"><div><div class="t-md t-w6">实际就餐人数</div><div class="t-xs c3 mt8">默认带出预计人数，按现场调整即可</div></div>'
       + '<div class="num-step"><button data-act="mv-minus">−</button><div class="n" id="mv-n" style="font-size:20px">' + expect + '</div><button data-act="mv-plus">＋</button></div></div>'
       + '<div class="mt12"><div class="t-sm t-w6">剩余饭菜</div><div class="t-xs c3 mt8">有明显剩余时留存，方便后续看浪费程度；没有可不留。</div>'
-      + Comp.photoPicker('meal-leftover-photo', 'meal-photo-n', _mealActualPhotos.length, '支持相册/文件上传或现场拍照')
+      + Comp.photoPicker('meal-leftover-photo', 'meal-photo-n', 0, '支持相册/文件上传或现场拍照')
       + '</div>'
       + '<textarea class="inp mt12" id="meal-leftover-note" placeholder="剩余情况说明（选填）" style="text-align:left;border:1px solid var(--line-2);border-radius:9px;padding:9px;height:50px"></textarea>'
       + '</div>',
@@ -15446,16 +15603,14 @@ App.act('meal-actual-save', function (el) {
   var n = document.getElementById('mv-n');
   var v = n ? +n.textContent : NaN;
   if (isNaN(v) || v < 0) { U.toast('请输入实际人数'); return; }
-  var photos = _mealActualPhotos.map(function (source, i) {
-    return 'meal_leftover_' + source + '_' + Date.now() + '_' + i;
-  });
+  var photos = Comp.photoValues('meal-leftover-photo');
   var res = Engine.Meal.setActual(el.getAttribute('data-w'), v, {
     photos: photos,
     note: ((document.getElementById('meal-leftover-note') || {}).value || '').trim()
   });
   if (!res || res.ok === false) { U.toast((res && res.reason) || '记录失败'); return; }
   DB.flush(); App.closeSheet();
-  U.toast(_mealActualPhotos.length ? '已记录实际人数并留存剩余饭菜照片' : '已记录员工餐实际人数');
+  U.toast(photos.length ? '已记录实际人数并留存剩余饭菜照片' : '已记录员工餐实际人数');
   App.refresh();
 });
 
@@ -15738,6 +15893,19 @@ function purchaseDetail(id) {
         + '<div class="grow"><div class="t-sm t-w6">' + U.esc(f.step) + ' · ' + U.esc(f.action) + '</div>'
         + '<div class="t-xs c3 mt8">' + U.mdhm(f.at) + ' · ' + U.esc(DB.userName(f.userId)) + (f.comment ? ' · ' + U.esc(f.comment) : '') + '</div></div></div>';
     }).join('') + '</div></div>';
+  var acceptances = DB.find('purchaseAcceptances', function (a) { return a.purchaseId === p.id && AuthContext.inScope(a); })
+    .sort(function (a, b) { return (a.at || 0) - (b.at || 0); });
+  if (acceptances.length) {
+    html += '<div class="card"><div class="card-title">验收档案</div>'
+      + acceptances.map(function (a) {
+        return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
+          + '<div class="t-sm t-w6">第 ' + (a.round || 1) + ' 次 · ' + (a.result === 'pass' ? '验收合格' : '验收不合格') + '</div>'
+          + '<div class="t-xs c3 mt8">' + U.esc(a.acceptorName || DB.userName(a.acceptorId)) + ' · ' + U.mdhm(a.at) + '</div>'
+          + (a.reason ? '<div class="t-xs c3 mt8">说明：' + U.esc(a.reason) + '</div>' : '')
+          + ((a.photos || []).length ? '<div class="t-xs c3 mt8">现场照片 ' + a.photos.length + ' 张</div>' + Comp.photos(a.photos) : '')
+          + '</div>';
+      }).join('') + '</div>';
+  }
   return html;
 }
 
@@ -15867,7 +16035,7 @@ App.act('pr-receive-no', function (el) {
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="pr-receive-no-go" data-id="' + id + '">提交异常</button>'
   });
-  window.__prExc = { result: Engine.Purchase.EXC[0].key, items: [], photos: [] };
+  window.__prExc = { result: Engine.Purchase.EXC[0].key, items: [], photos: [] }; Comp.clearPhotos('pr-exc-photo');
 });
 function prExcAddPhoto(source) {
   window.__prExc = window.__prExc || { result: 'handle', items: [], photos: [] };
@@ -15899,7 +16067,7 @@ App.act('pr-receive-no-go', function (el) {
   var f = window.__prExc || { result: 'handle', items: [] };
   var res = Engine.Purchase.receive(el.getAttribute('data-id'), false, {
     result: f.result, items: f.items, reason: (document.getElementById('pr-exc-note') || {}).value || '',
-    photos: (f.photos || []).map(function (source, i) { return 'purchase_' + source + '_' + Date.now() + '_' + i; })
+    photos: Comp.photoValues('pr-exc-photo')
   });
   DB.flush(); App.closeSheet(); window.__prExc = null;
   if (res && res.error) { U.toast(res.error); return; }
@@ -17466,7 +17634,7 @@ App.page('handover', {
     html += Comp.sectionTitle('最近交接');
     html += list.length ? '<div class="list">' + list.map(function (h) {
       var remain = (h.items || []).filter(function (x) { return x.status !== 'done'; }).length;
-      return '<div class="li"><div class="grow"><div class="row-b"><div class="t-sm t-w6">' + U.esc(h.shift || '交班') + ' · ' + U.esc(DB.userName(h.userId)) + ' → ' + U.esc(DB.userName(h.toUserId || '')) + '</div>'
+      return '<div class="li" data-act="ho-open" data-id="' + h.id + '"><div class="grow"><div class="row-b"><div class="t-sm t-w6">' + U.esc(h.shift || '交班') + ' · ' + U.esc(DB.userName(h.userId)) + ' → ' + U.esc(DB.userName(h.toUserId || '')) + '</div>'
         + '<span class="chip chip-' + hoStateCls(h) + '">' + hoStateName(h) + '</span></div>'
         + '<div class="t-xs c3 mt8">' + U.mdhm(h.createdAt) + ' · 待跟进 ' + remain + ' 项 · 系统任务 ' + ((h.taskIds || []).length) + ' 项</div>'
         + (h.incident ? '<div class="t-xs c-red mt8">异常：' + U.esc(h.incident) + '</div>' : '')
@@ -17475,6 +17643,43 @@ App.page('handover', {
     return html;
   }
 });
+
+App.page('handover-detail', {
+  title: '交接记录详情',
+  render: function (r) {
+    var h = Engine.Handover.get(r.arg);
+    if (!h) return Comp.empty('交接记录不存在', '🔄');
+    var html = '<div class="card mt12"><div class="row-b"><div class="t-lg t-w6">' + U.esc(h.shift || '交班') + ' → ' + U.esc(h.nextShift || '') + '</div>'
+      + '<span class="chip chip-' + hoStateCls(h) + '">' + hoStateName(h) + '</span></div>'
+      + '<div class="t-xs c3 mt8">交班：' + U.esc(DB.userName(h.userId)) + ' · ' + U.mdhm(h.createdAt) + '</div>'
+      + '<div class="t-xs c3 mt8">接班：' + U.esc(DB.userName(h.toUserId)) + (h.acceptedAt ? ' · ' + U.mdhm(h.acceptedAt) : ' · 尚未接收') + '</div>'
+      + (h.closedAt ? '<div class="t-xs c3 mt8">闭环：' + U.mdhm(h.closedAt) + '</div>' : '')
+      + '</div>';
+    if (h.checks) {
+      html += '<div class="card"><div class="card-title">交班核对</div>'
+        + '<div class="t-xs c3 mt8">房卡 ' + (h.checks.cards ? '✓' : '—') + ' · 备用金 ' + (h.checks.cash ? '✓' : '—') + ' · 房态/制卡 ' + (h.checks.roomState ? '✓' : '—') + '</div></div>';
+    }
+    if (h.incident || h.notes) html += '<div class="card"><div class="card-title">异常 / 补充</div>'
+      + (h.incident ? '<div class="t-sm c-red mt8">' + U.esc(h.incident) + '</div>' : '')
+      + (h.notes ? '<div class="t-sm c2 mt8">' + U.esc(h.notes) + '</div>' : '') + '</div>';
+    html += '<div class="card"><div class="card-title">手工交接事项</div>'
+      + ((h.items || []).length ? (h.items || []).map(function (it) {
+        return '<div style="padding:10px 0;border-bottom:1px solid var(--line)">'
+          + '<div class="row-b"><div class="t-sm">' + U.esc(it.text) + '</div><span class="chip ' + (it.status === 'done' ? 'chip-green' : 'chip-orange') + '">' + (it.status === 'done' ? '已完成' : '待处理') + '</span></div>'
+          + (it.closedAt ? '<div class="t-xs c3 mt8">' + U.esc(DB.userName(it.closedBy)) + ' · ' + U.mdhm(it.closedAt) + (it.closeNote ? ' · ' + U.esc(it.closeNote) : '') + '</div>' : '') + '</div>';
+      }).join('') : '<div class="t-xs c3 mt8">无手工交接事项</div>') + '</div>';
+    if ((h.taskIds || []).length) {
+      html += '<div class="card"><div class="card-title">系统任务承接</div>' + (h.taskIds || []).map(function (tid) {
+        var t = DB.byId('tasks', tid);
+        if (!t) return '';
+        return '<div class="li" data-act="open-task" data-id="' + tid + '"><div class="grow"><div class="t-sm t-w6">' + U.esc(t.title) + '</div>'
+          + '<div class="t-xs c3 mt8">' + U.esc(t.code || '') + ' · ' + U.esc(t.status || '') + '</div></div><div class="li-arrow">›</div></div>';
+      }).join('') + '</div>';
+    }
+    return html;
+  }
+});
+App.act('ho-open', function (el) { App.go('handover-detail/' + el.getAttribute('data-id')); });
 
 App.act('ho-shift', function (el) { _hoShift = el.getAttribute('data-s'); App.refresh(); });
 App.act('ho-check', function (el) {
@@ -19312,7 +19517,7 @@ App.act('hk-insp-fail', function (el) {
     foot: '<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
       + '<button class="btn btn-primary grow" data-act="hk-insp-fail-go" data-id="' + id + '">提交并生成整改</button>'
   });
-  window.__hkIssues = []; window.__hkIssuePhotos = [];
+  window.__hkIssues = []; window.__hkIssuePhotos = []; Comp.clearPhotos('hk-issue-photo');
 });
 function hkIssueAddPhoto(source) {
   window.__hkIssuePhotos = window.__hkIssuePhotos || [];
@@ -19334,7 +19539,7 @@ App.act('hk-insp-fail-go', function (el) {
   var cats = window.__hkIssues || [];
   if (!cats.length) { U.toast('请至少选择一个问题类别'); return; }
   var note = (document.getElementById('hk-issue-note') || {}).value || '';
-  var photos = (window.__hkIssuePhotos || []).map(function (source, i) { return 'inspection_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('hk-issue-photo');
   var res = RoomSvc.inspFinish(el.getAttribute('data-id'), 'fail', {
     issues: cats.map(function (c) { return { cat: c, note: note, photos: photos }; }),
     photos: photos
@@ -20674,6 +20879,7 @@ var _bfActualPhotos = [];
 var _tmDonePhotos = [];
 App.act('bf-actual', function () {
   _bfActualPhotos = [];
+  Comp.clearPhotos('bf-leftover-photo');
   App.sheet({
     title: '早餐收尾统计',
     body: '<div class="pad" style="padding:8px 18px">'
@@ -20681,7 +20887,7 @@ App.act('bf-actual', function () {
       + '<div class="num-step"><button data-act="bf-minus">−</button><input id="bf-n" type="number" min="0" max="999" inputmode="numeric" value="0" autocomplete="off" style="width:76px;height:40px;border:1px solid var(--line-2);border-radius:10px;background:#fff;text-align:center;font-size:20px;font-weight:600;outline:none;-webkit-user-select:text;user-select:text"><button data-act="bf-plus">＋</button></div></div>'
       + '<div class="card mt12" style="margin-left:0;margin-right:0"><div class="t-md t-w6">剩余食品照片</div>'
       + '<div class="t-xs c3 mt8">完成收尾前至少上传 1 张餐后照片。</div>'
-      + Comp.photoPicker('bf-leftover-photo', 'bf-photo-n', _bfActualPhotos.length, '支持相册/文件上传或现场拍照')
+      + Comp.photoPicker('bf-leftover-photo', 'bf-photo-n', 0, '支持相册/文件上传或现场拍照')
       + '</div>'
       + '<textarea class="inp mt12" id="bf-actual-note" placeholder="补充说明（选填），如：剩余少量粥和面点" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:60px"></textarea>'
       + '<div class="t-xs c3 mt12">实际人数和餐后照片都必须记录。</div></div>',
@@ -20708,16 +20914,14 @@ App.act('bf-actual-save', function () {
   var input = document.getElementById('bf-n');
   var n = Math.max(0, Math.min(999, +(String((input || {}).value || '').replace(/\D/g, '')) || 0));
   if (input) input.value = n;
-  var photos = _bfActualPhotos.map(function (source, i) {
-    return 'breakfast_leftover_' + source + '_' + Date.now() + '_' + i;
-  });
+  var photos = Comp.photoValues('bf-leftover-photo');
   var res = Breakfast.actual(n, {
     photos: photos,
     note: ((document.getElementById('bf-actual-note') || {}).value || '').trim()
   });
   if (!res || res.ok === false) { U.toast((res && res.reason) || '保存失败'); return; }
   DB.flush(); App.closeSheet();
-  U.toast(_bfActualPhotos.length ? '已记录早餐人数并留存剩余食品照片' : '已记录早餐实际人数');
+  U.toast(photos.length ? '已记录早餐人数并留存剩余食品照片' : '已记录早餐实际人数');
   App.refresh();
 });
 App.act('bf-history', function () { App.go('bf-history'); });
@@ -20797,7 +21001,12 @@ App.page('team-meal', {
       + '<div class="t-sm c2 mt12">' + U.esc(m.date) + ' ' + U.esc(m.slot || '') + (m.time ? ' ' + U.esc(m.time) : '') + ' · 预计 ' + (m.peopleCount || 0) + ' 人</div>'
       + (m.place ? '<div class="t-sm c2 mt8">地点：' + U.esc(m.place) + '</div>' : '')
       + (m.requirement ? '<div class="t-sm c2 mt8">要求：' + U.esc(m.requirement) + '</div>' : '')
-      + '<div class="mt12"><span class="chip chip-' + TeamMeal.stCls(m.status) + '">' + TeamMeal.stName(m.status) + '</span></div></div>';
+      + '<div class="mt12"><span class="chip chip-' + TeamMeal.stCls(m.status) + '">' + TeamMeal.stName(m.status) + '</span></div>'
+      + (m.confirmedAt ? '<div class="t-xs c3 mt8">厨师确认：' + U.esc(m.confirmedByName || DB.userName(m.confirmedBy)) + ' · ' + U.mdhm(m.confirmedAt) + '</div>' : '')
+      + (m.completedAt ? '<div class="t-xs c3 mt8">厨工收尾：' + U.esc(m.completedByName || DB.userName(m.completedBy)) + ' · ' + U.mdhm(m.completedAt) + ' · 实际 ' + (m.actualCount || 0) + ' 人</div>' : '')
+      + (m.remark ? '<div class="t-xs c3 mt8">备注：' + U.esc(m.remark) + '</div>' : '')
+      + (m.mealPhotos && m.mealPhotos.length ? '<div class="t-sm t-w6 mt12">餐后照片</div>' + Comp.photos(m.mealPhotos) : '')
+      + '</div>';
     if (m.status === 'received' && TeamMeal.canAcknowledge(me)) {
       html += '<div class="card"><div class="card-title">需要你确认</div><div class="t-xs c3 mt8">确认表示厨房已收到并据此备餐。</div>'
         + '<div class="btn btn-primary btn-block mt12" data-act="tm-adv" data-id="' + m.id + '" data-k="confirmed">确认收到</div></div>';
@@ -20843,11 +21052,29 @@ App.page('breakfast-item', {
       + (latest && latest.from !== 0 ? '<div class="t-sm mt8" style="color:var(--orange)">最近修订：' + latest.from + ' → ' + latest.to + ' 人（' + (change > 0 ? '+' : '') + change + '）</div><div class="t-xs c3 mt8">' + U.esc(latest.byName || DB.userName(latest.by)) + ' · ' + U.esc(U.relTime(latest.at)) + '</div>' : '')
       + (d.ackAt ? '<div class="t-xs c3 mt8">已确认：' + U.esc(d.ackByName || DB.userName(d.ackBy)) + '</div>' : '<div class="t-xs c3 mt8">待厨师确认</div>')
       + '</div>';
+    if (hist.length) {
+      html += '<details class="card card-tight"><summary class="row-b" style="cursor:pointer;list-style:none;padding:2px 0">'
+        + '<span class="t-md t-w6">预计修订完整记录</span><span class="t-sm c3">' + hist.length + ' 条 ›</span></summary>'
+        + '<div class="mt12">' + hist.map(function (h) {
+          return '<div class="t-xs c3" style="padding:7px 0;border-bottom:1px solid var(--line)">'
+            + U.esc(h.byName || DB.userName(h.by)) + ' · ' + h.from + ' → ' + h.to + ' 人 · '
+            + U.esc(h.reason || '') + ' · ' + U.mdhm(h.at) + '</div>';
+        }).join('') + '</div></details>';
+    }
+    if (d.actualAt) {
+      html += '<div class="card"><div class="card-title">餐后收尾记录</div>'
+        + '<div class="t-md mt12">实际 ' + d.actual + ' 人 · 与最终预计差 ' + ((d.actual - (d.finalForecast || 0)) > 0 ? '+' : '') + (d.actual - (d.finalForecast || 0)) + ' 人</div>'
+        + '<div class="t-xs c3 mt8">收尾人：' + U.esc(DB.userName(d.actualBy) || d.actualBy || '—') + ' · ' + U.mdhm(d.actualAt) + '</div>'
+        + (d.note ? '<div class="t-xs c3 mt8">备注：' + U.esc(d.note) + '</div>' : '')
+        + ((d.leftoverPhotos || []).length ? '<div class="t-sm t-w6 mt12">餐后照片</div>' + Comp.photos(d.leftoverPhotos) : '<div class="t-xs c3 mt8">无餐后照片</div>')
+        + '</div>';
+    }
     if (d.firstAt && !d.ackAt && Policy.can(me, 'catering_ack')) html += '<div class="btn btn-primary btn-block" data-act="bf-ack" data-date="' + d.date + '">确认已知悉</div>';
     if (d.firstAt && !d.actualAt && Breakfast.canActual(me) && d.date === U.ymd()) html += '<div class="btn btn-green btn-block mt12" data-act="bf-actual">录实际人数与餐后照片</div>';
     return html;
   }
 });
+
 
 App.page('catering-close-history', {
   title: '餐饮验收记录',
@@ -20900,7 +21127,8 @@ App.page('catering-history-meal-detail', {
         + '<div class="t-xs c3 mt8">申报人员：' + U.esc(names(label === '午餐' ? 'lunch' : 'dinner')) + '</div>'
         + (at ? '<div class="t-xs c3 mt8">收尾：' + U.esc(DB.userName(by) || by || '—') + ' · ' + U.dt(at) + '</div>' : '')
         + (note ? '<div class="t-xs c3 mt8">备注：' + U.esc(note) + '</div>' : '')
-        + '<div class="t-xs c3 mt8">照片：' + ((photos || []).length ? ((photos || []).length + ' 张（当前验收版仅保存照片标识，原图持久化待收口）') : '无') + '</div></div>';
+        + '<div class="t-xs c3 mt8">照片：' + ((photos || []).length ? ((photos || []).length + ' 张') : '无') + '</div>'
+        + ((photos || []).length ? Comp.photos(photos) : '') + '</div>';
     }
     return '<div class="section-title">' + U.esc(date) + '</div>'
       + row('午餐', reports.filter(function(m){return m.lunch===1;}).length, d.lunchActual || 0, d.lunchActualAt, d.lunchActualBy, d.lunchLeftoverNote, d.lunchLeftoverPhotos)
@@ -20955,6 +21183,7 @@ App.act('tm-done', function (el) {
   var id = el.getAttribute('data-id');
   var m = DB.byId('teamMeals', id);
   _tmDonePhotos = [];
+  Comp.clearPhotos('tm-close-photo');
   App.sheet({
     title: '录实际人数与餐后照片',
     body: '<div class="pad" style="padding:8px 18px">'
@@ -20975,7 +21204,7 @@ function tmAddPhoto(source) {
 App.act('tm-close-photo-upload', function () { tmAddPhoto('upload'); });
 App.act('tm-close-photo-camera', function () { tmAddPhoto('camera'); });
 App.act('tm-done-go', function (el) {
-  var photos = _tmDonePhotos.map(function (source, i) { return 'team_meal_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('tm-close-photo');
   var res = TeamMeal.advance(el.getAttribute('data-id'), 'done', {
     actualCount: +((document.getElementById('tm-n') || {}).textContent || 0),
     photos: photos
@@ -21371,7 +21600,9 @@ App.act('rt-open', function (el) {
           return '<div class="li"><div class="grow"><div class="row-b"><div class="t-md">' + U.esc(h.date) + '</div>'
             + '<div class="t-xs c3">' + (h.startAt ? U.hm(h.startAt) : '未开始') + ' → ' + (h.doneAt ? U.hm(h.doneAt) : '—') + '</div></div>'
             + '<div class="t-xs c3 mt8">' + (h.actualAssigneeId ? U.esc(DB.userName(h.actualAssigneeId)) : '无人执行')
-            + ' · ' + (h.status === 'done' ? '已完成' : U.esc(h.status)) + (h.result ? ' · ' + U.esc(h.result) : '') + '</div></div></div>';
+            + ' · ' + (h.status === 'done' ? '已完成' : U.esc(h.status)) + (h.result ? ' · ' + U.esc(h.result) : '') + '</div>'
+            + (h.verifiedAt ? '<div class="t-xs c3 mt8">验收：' + U.esc(DB.userName(h.verifiedBy)) + ' · ' + U.mdhm(h.verifiedAt) + '</div>' : '')
+            + '</div></div>';
         }).join('') + '</div>'
         : Comp.empty('还没有到期的执行记录', '🔁'))
       + '<div class="pad mt12"><div class="btn btn-block btn-ghost" data-act="rt-toggle" data-id="' + rt.id + '">'
@@ -21573,7 +21804,7 @@ App.act('mt-open', function (el) {
           + '<div class="grow"><div class="t-md">' + U.esc(rs.name) + '</div></div><div class="li-arrow">›</div></div>';
       }).join('') + '</div>'
   });
-  window.__mtPhotos = [];
+  window.__mtPhotos = []; Comp.clearPhotos('mt-photo');
 });
 function mtAddPhoto(source) {
   window.__mtPhotos = window.__mtPhotos || [];
@@ -21585,7 +21816,7 @@ App.act('mt-photo-upload', function () { mtAddPhoto('upload'); });
 App.act('mt-photo-camera', function () { mtAddPhoto('camera'); });
 App.act('mt-finish', function (el) {
   var rm = document.getElementById('mt-remark');
-  var photos = (window.__mtPhotos || []).map(function (source, i) { return 'maintenance_' + source + '_' + Date.now() + '_' + i; });
+  var photos = Comp.photoValues('mt-photo');
   var res = Maintenance.finish(el.getAttribute('data-id'), el.getAttribute('data-r'),
     { remark: rm ? rm.value.trim() : '', photos: photos });
   U.toast(res.ok
@@ -21741,7 +21972,7 @@ function reqRow(x, showActions) {
   var over = GuestReq.isOverdue(x);
   var ST = { pending: ['待处理', 'chip-orange'], doing: ['处理中', 'chip-blue'], done: ['已完成', 'chip-green'], canceled: ['已取消', 'chip-gray'] };
   var s = ST[x.status] || ST.pending;
-  return '<div class="li">'
+  return '<div class="li" data-act="gq-open" data-id="' + x.id + '">'
     + '<div class="li-icon" style="background:' + (x.guestRequestType === 'repair' ? '#fdf1e5' : '#f0ecfd') + '">' + tp.icon + '</div>'
     + '<div class="grow"><div class="row-b"><div class="t-md t-w6">' + U.esc(x.roomNo) + ' 房 · ' + U.esc(tp.name) + '</div>'
     + '<span class="chip ' + (over && x.status !== 'done' ? 'chip-red' : s[1]) + '">' + (over && x.status !== 'done' ? '超时' : s[0]) + '</span></div>'
@@ -21757,6 +21988,35 @@ function reqRow(x, showActions) {
       + '</div>' : '')
     + '</div></div>';
 }
+
+App.page('guest-request', {
+  title: '客人需求详情',
+  render: function (r) {
+    var x = DB.byId('guestRequests', r.arg);
+    if (!x || !AuthContext.inScope(x)) return Comp.empty('需求记录不存在', '🛎️');
+    var tp = GuestReq.typeOf(x.guestRequestType);
+    var html = '<div class="card mt12"><div class="card-title">' + U.esc(x.roomNo) + ' 房 · ' + U.esc(tp.name) + '</div>'
+      + '<div class="t-sm c2 mt12">' + U.esc(x.content || '') + '</div>'
+      + '<div class="t-xs c3 mt8">来源：' + U.esc(x.source === 'guest_qr' ? '住客扫码' : (x.source || '内部发起')) + '</div>'
+      + '<div class="t-xs c3 mt8">创建：' + U.mdhm(x.createdAt) + '</div>'
+      + (x.acceptedAt ? '<div class="t-xs c3 mt8">接手：' + U.esc(DB.userName(x.currentOwnerId) || '责任员工') + ' · ' + U.mdhm(x.acceptedAt) + '</div>' : '')
+      + (x.completedAt ? '<div class="t-xs c3 mt8">完成：' + U.mdhm(x.completedAt) + '</div>' : '')
+      + (x.transferNote ? '<div class="t-xs c3 mt8">转办：' + U.esc(x.transferNote) + '</div>' : '')
+      + '</div>';
+    if (x.taskId) {
+      var t = DB.byId('tasks', x.taskId);
+      if (t) html += '<div class="card"><div class="card-title">关联任务</div><div class="li" data-act="open-task" data-id="' + t.id + '">'
+        + '<div class="grow"><div class="t-sm t-w6">' + U.esc(t.title) + '</div><div class="t-xs c3 mt8">' + U.esc(t.code || '') + ' · ' + U.esc(t.status || '') + '</div></div><div class="li-arrow">›</div></div></div>';
+    }
+    if (x.workOrderId) {
+      var w = DB.byId('workOrders', x.workOrderId);
+      if (w) html += '<div class="card"><div class="card-title">关联工程工单</div><div class="li" data-act="open-wo" data-id="' + w.id + '">'
+        + '<div class="grow"><div class="t-sm t-w6">' + U.esc(w.title || w.code) + '</div><div class="t-xs c3 mt8">' + U.esc(w.code || '') + ' · ' + U.esc(w.status || '') + '</div></div><div class="li-arrow">›</div></div></div>';
+    }
+    return html;
+  }
+});
+App.act('gq-open', function (el) { App.go('guest-request/' + el.getAttribute('data-id')); });
 
 App.act('gq-tab', function (el) { App.go('guest?tab=' + el.getAttribute('data-k')); });
 App.act('gq-pick-room', function (el) { App.go('guest?tab=qr&roomId=' + el.getAttribute('data-id')); });
