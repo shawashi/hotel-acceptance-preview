@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 19:15 · DEV-006 组织赋权与任务路由专项版 [e94a1c2c07d5]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 20:16 · DEV-006 组织赋权与任务路由专项版 [ee956cea790b]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -14470,7 +14470,7 @@ function homeGM(me) {
   html+='<div class="card" style="padding:10px 12px;margin-bottom:8px">'
     +'<div class="t-sm t-w6" style="margin-bottom:4px">常用操作</div>'
     +'<div class="list" style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">'
-    +shortcut('go-recurring','📋','安排巡检','设置、查看进度',check)
+    +shortcut('go-recurring-plan','📋','安排任务','巡检、定时任务',0)
     +shortcut('go-org','👥','员工管理','人员、岗位、授权',0)
     +shortcut('gm-manage','⚙️','门店设置','房间、物资、费用',0)
     +shortcut('gm-all-work','📌','全部工作','任务与待处理事项',0)
@@ -14637,6 +14637,7 @@ App.act('go-guest-hk', function () { App.go('guest-hk-new'); });
 App.act('go-guest-internal', function () { App.go('guest?tab=new'); });
 App.act('go-maint', function () { App.go('maint?tab=todo'); });
 App.act('go-recurring', function () { App.go('recurring?tab=today'); });
+App.act('go-recurring-plan', function () { App.go('recurring?tab=rule'); });
 App.act('go-recurring-history', function () { App.go('recurring?tab=rule'); });
 App.act('go-cost', function () { App.go('cost?range=today'); });
 App.act('go-sop', function () { App.go('sop'); });
@@ -22089,7 +22090,7 @@ App.page('recurring', {
   render: function (r) {
     var me = Engine.Session.user();
     var canCreate = Policy.can(me, 'manage_recurring_task');
-    var tab = r.params.tab || 'today';
+    var tab = r.params.tab || (canCreate ? 'rule' : 'today');
     var owned = Recurring.list({activeOnly:false}).filter(function(rt){return rt.createdBy===me.id;});
     var canViewHistory = canCreate || owned.length > 0;
     if (tab === 'rule' && !canViewHistory) return Comp.empty('周期任务由店长配置；请从我的工作处理本期任务', '🔒');
@@ -22116,11 +22117,23 @@ App.page('recurring', {
     });
     var mine = todayIns.filter(function (x) { return x.actualAssigneeId === me.id || x.assigneeId === me.id; });
 
-    var html = '<div class="pad mt12">' + Comp.seg([
-      { k: 'today', n: '待执行 ' + todayIns.filter(function(x){return x.status==='pending'||x.status==='doing';}).length },
-      { k: 'check', n: '待验收 ' + awaiting.filter(function(x){return isGM||Recurring.canVerify(x,me);}).length },
-      { k: 'done', n: '已完成 ' + completed.length }
-    ].concat(canViewHistory ? [{ k: 'rule', n: '已安排 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
+    /* For a creator, this is an arranging screen, not an execution dashboard.
+       Keep operator execution and approval routes accessible without crowding creation. */
+    var html = '';
+    if (canViewHistory && tab === 'rule') {
+      html += '<div class="card mt12" style="padding:12px">'
+        + (canCreate ? '<div class="btn btn-primary btn-block" data-act="rt-create" style="text-align:center;margin-bottom:10px">＋ 新建巡检或定时任务</div>' : '')
+        + '<div class="row-b"><div class="t-md t-w6">已设置的任务 · ' + rules.length + '</div>'
+        + (canCreate ? '<span class="t-xs c3" data-act="rt-view-records" style="cursor:pointer">查看执行记录 ›</span>' : '') + '</div>'
+        + '</div>';
+    } else if (tab === 'today' || tab === 'check' || tab === 'done') {
+      html += '<div class="pad mt12">' + Comp.seg([
+        { k:'today', n:'待执行 ' + todayIns.filter(function(x){return x.status==='pending'||x.status==='doing';}).length },
+        { k:'check', n:'待验收 ' + awaiting.filter(function(x){return isGM||Recurring.canVerify(x,me);}).length },
+        { k:'done', n:'已完成 ' + completed.length }
+      ],tab,'rt-tab') + '</div>';
+      if (canCreate) html += '<div class="t-xs c3 pad" data-act="rt-back-rules">‹ 返回安排任务</div>';
+    }
 
     if (tab === 'today') {
       html += '<div class="card mt12" style="padding:9px 12px"><div class="card-head"><div class="card-title">巡检进度</div></div>'
@@ -22153,11 +22166,9 @@ App.page('recurring', {
           +'</div></div>';
       }).join('')+'</div>';
     } else {
-      html += '<div class="card mt12" style="padding:10px 12px"><div class="card-head"><div class="card-title">已安排的巡检</div>'
-        + (canCreate ? '<div class="card-more" data-act="rt-create">＋ 安排巡检 ›</div>' : '') + '</div>'
-        + (!canCreate ? '<div class="t-xs c3">你以前安排的巡检可查看，现已无权修改</div>' : '') + '</div>';
+      if (!canCreate) html += '<div class="t-xs c3 pad">仅可查看你以前设置的任务，不能修改</div>';
 
-      if (!rules.length) html += Comp.empty('还没有周期任务规则', '🔁');
+      if (!rules.length) html += Comp.empty('还没有设置任务，点击上方「新建」开始', '📋');
       else html += '<div class="list">' + rules.map(function (rt) {
         var done = Recurring.historyOf(rt.id).filter(function (x) { return x.status === 'done'; }).length;
         return '<div class="li" data-act="rt-open" data-id="' + rt.id + '">'
@@ -22199,6 +22210,8 @@ function isMine(ins) {
   return ins.actualAssigneeId === me.id || ins.assigneeId === me.id;
 }
 
+App.act('rt-view-records', function () { App.go('recurring?tab=check'); });
+App.act('rt-back-rules', function () { App.go('recurring?tab=rule'); });
 App.act('rt-tab', function (el) { App.go('recurring?tab=' + el.getAttribute('data-k')); });
 
 App.act('rt-start', function (el) {
@@ -22223,7 +22236,7 @@ App.act('rt-create', function () {
   if (!Policy.can(Engine.Session.user(), 'manage_recurring_task')) return U.toast('只有店长或授权人员可以配置周期任务');
   var depts = DB.all('departments').filter(function (d) { return d.id !== 'd_sup' && d.id !== 'd_dev' && Policy.canInDept(Engine.Session.user(), 'manage_recurring_task', d.id); });
   App.sheet({
-    title: '安排巡检',
+    title: '新建巡检或定时任务',
     body: '<div class="pad" style="padding:8px 16px">'
       + '<div class="frow"><div class="fn">任务名称</div><input class="inp" id="rt-title" placeholder="如：客房主管每日查房" style="flex:1;text-align:left"></div>'
       + '<div class="frow"><div class="fn">责任部门</div><select class="inp" id="rt-dept" style="flex:1;text-align:left">'
