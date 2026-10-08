@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 18:27 · DEV-006 组织赋权与任务路由专项版 [acf237ee65a9]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 19:15 · DEV-006 组织赋权与任务路由专项版 [e94a1c2c07d5]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -14437,77 +14437,64 @@ function homeManager(me) {
  * 店长 / 总经理驾驶舱
  * ======================================================================= */
 function homeGM(me) {
-  /* Small-hotel manager homepage: interventions first; routine departmental work stays
-   * with responsible employees. Financial and monthly statistics live in Data, not Home. */
+  /* One-screen GM launchpad: important work summary plus exactly one entry for each job.
+     No dynamic expansion of cards when new alerts arrive; all work remains in detail pages. */
   var incidents = Engine.Incident.open();
-  var urgent = incidents.filter(function(x){return x.level === 'high';});
-  var approvals = Engine.Purchase.pendingFor(me.id).filter(function(p){return p.status === 'boss';});
+  var urgent = incidents.filter(function(x){return x.level==='high';}).length;
+  var approvals = Engine.Purchase.pendingFor(me.id).filter(function(p){return p.status==='boss';}).length;
+  var recurring = Recurring.todoForDept('',U.ymd());
+  var pending = recurring.filter(function(x){return x.status==='pending'||x.status==='doing';}).length;
+  var check = recurring.filter(function(x){return x.status==='waitcheck'&&Recurring.canVerify(x,me);}).length;
+  var done = Recurring.historyOf('').filter(function(x){return x.status==='done'&&U.ymd(x.verifiedAt||x.doneAt||0)===U.ymd();}).length;
   var decisions = Engine.Decision.stats(me.id);
-  var overdue = Engine.Task.query({open:true}).filter(Engine.Task.isOverdue);
-  var recurring = Recurring.todoForDept('', U.ymd());
-  var toVerify = recurring.filter(function(x){return x.status==='waitcheck'&&Recurring.canVerify(x,me);});
-  var toDo = recurring.filter(function(x){return x.status==='pending'||x.status==='doing';});
-  var recentlyDone = Recurring.historyOf('').filter(function(x){return x.status==='done'&&U.ymd(x.verifiedAt||x.doneAt||0)===U.ymd();});
-  var actionCount = urgent.length + approvals.length + toVerify.length;
-  var html = '<div class="card mt12"><div class="row-b"><div class="grow">'
-    + '<div class="t-lg t-w6">店长工作台</div>'
-    + '<div class="t-xs c3 mt8">' + U.md() + ' ' + U.weekdayCN() + ' · ' + U.esc(me.name) + '</div></div>'
-    + '<span class="chip '+(actionCount?'chip-orange':'chip-green')+'">'+(actionCount?actionCount+' 项需关注':'暂无紧急事项')+'</span>'
-    + '</div></div>';
-
-  if (actionCount) {
-    html += '<div class="card"><div class="card-head"><div class="card-title">需要我处理</div></div>';
-    if (toVerify.length) html += '<div class="li" data-act="go-recurring-check"><div class="grow"><div class="t-md t-w6">周期任务待验收 · '+toVerify.length+' 项</div>'
-      + '<div class="t-xs c3 mt8">审核员工已提交的执行结果</div></div><div class="li-arrow">›</div></div>';
-    if (approvals.length) html += '<div class="li" data-act="open-approval"><div class="grow"><div class="t-md t-w6">采购审批 · '+approvals.length+' 项</div></div><div class="li-arrow">›</div></div>';
-    if (urgent.length) html += '<div class="li" data-act="open-incident"><div class="grow"><div class="t-md t-w6">紧急异常 · '+urgent.length+' 项</div></div><div class="li-arrow">›</div></div>';
-    html += '</div>';
+  var workCount = urgent+approvals+check;
+  function shortcut(act,icon,name,desc,count) {
+    return '<div class="li" data-act="'+act+'" style="padding:9px 10px;min-height:49px">'
+      +'<div class="li-icon" style="font-size:19px;width:32px;min-width:32px">'+icon+'</div>'
+      +'<div class="grow"><div class="t-sm t-w6">'+name+'</div>'
+      +'<div class="t-xs c3">'+desc+'</div></div>'
+      +(count?'<span class="chip chip-orange">'+count+'</span>':'')
+      +'<div class="li-arrow">›</div></div>';
   }
-  html += '<div class="card"><div class="card-head"><div class="card-title">部门执行情况</div>'
-    + '<div class="card-more" data-act="go-recurring">查看周期任务 ›</div></div>'
-    + '<div class="kpi-grid c3">'
-    + kpiBox2(toDo.length,'待执行')
-    + kpiBox2(toVerify.length,'待验收')
-    + kpiBox2(recentlyDone.length,'今日完成')
-    + '</div><div class="t-xs c3 mt12">仅统计周期任务；其他部门任务在任务工作台查看，避免混算。</div></div>';
-
-  if (incidents.length && !urgent.length) {
-    html += '<div class="card card-tight" data-act="open-incident"><div class="row-b"><div class="grow">'
-      + '<div class="t-md t-w6">其他部门异常 · '+incidents.length+'</div>'
-      + '<div class="t-xs c3 mt8">按需查看，不重复展示每条部门待办</div></div><div class="li-arrow">›</div></div></div>';
-  }
-  if (overdue.length) {
-    html += '<div class="card card-tight" data-act="tab" data-k="tasks"><div class="row-b"><div class="grow">'
-      + '<div class="t-md t-w6">其他任务超时 · '+overdue.length+'</div></div><div class="li-arrow">›</div></div></div>';
-  }
-  if (decisions.open) html += '<div class="card card-tight" data-act="go-decision"><div class="row-b"><div class="grow">'
-    + '<div class="t-md t-w6">经营决议 · '+decisions.open+' 项进行中</div>'
-    + '<div class="t-xs c3 mt8">仅投资人与现任店长可见</div></div><div class="li-arrow">›</div></div></div>';
-
-  html += '<div class="card"><div class="card-head"><div class="card-title">管理入口</div></div>'
-    + '<div class="list">'
-    + '<div class="li" data-act="go-recurring"><div class="grow"><div class="t-md t-w6">周期任务</div><div class="t-xs c3 mt8">设置任务、查看待执行/待验收/已完成</div></div><div class="li-arrow">›</div></div>'
-    + '<div class="li" data-act="gm-manage"><div class="grow"><div class="t-md t-w6">人员、授权与门店配置</div><div class="t-xs c3 mt8">调整岗位权限及各部门执行规则</div></div><div class="li-arrow">›</div></div>'
-    + '</div></div>';
-  var personal = '';
-  if (Policy.businessEnabled('staff_meal',me.hotelId)) personal += enterBox('go-meal','员工餐申报','🍚','#faf4e9',0);
-  if (Policy.businessEnabled('restaurant',me.hotelId) && TeamMeal.canArrange(me)) personal += enterBox('tm-new','团餐发起','🍱','#faf4e9',0);
-  if (personal) html += '<div class="card"><div class="card-head"><div class="card-title">个人事务</div></div><div class="enter-grid">'+personal+'</div></div>';
+  var html='<div class="card mt12" style="padding:12px 14px;margin-bottom:8px">'
+    +'<div class="row-b"><div class="t-md t-w6">店长 · '+U.esc(me.name)+'</div>'
+    +'<span class="chip '+(workCount?'chip-orange':'chip-green')+'">'+(workCount?workCount+'项待处理':'暂无紧急事项')+'</span></div>'
+    +'<div class="t-xs c3 mt8">'+U.md()+' '+U.weekdayCN()+'</div>'
+    +'</div>';
+  html+='<div class="card" style="padding:10px 12px;margin-bottom:8px">'
+    +'<div class="row-b"><div class="t-sm t-w6">今日提醒</div>'
+    +'<span class="t-xs c3">点击对应入口处理</span></div>'
+    +'<div class="kpi-grid c3 mt8">'
+    +kpiBox2(urgent,'异常')+kpiBox2(approvals,'待审批')+kpiBox2(check,'待验收')
+    +'</div></div>';
+  html+='<div class="card" style="padding:10px 12px;margin-bottom:8px">'
+    +'<div class="t-sm t-w6" style="margin-bottom:4px">常用操作</div>'
+    +'<div class="list" style="display:grid;grid-template-columns:1fr 1fr;gap:2px 8px">'
+    +shortcut('go-recurring','📋','安排巡检','设置、查看进度',check)
+    +shortcut('go-org','👥','员工管理','人员、岗位、授权',0)
+    +shortcut('gm-manage','⚙️','门店设置','房间、物资、费用',0)
+    +shortcut('gm-all-work','📌','全部工作','任务与待处理事项',0)
+    +'</div></div>';
+  if (decisions.open) html+=shortcut('go-decision','🔒','经营事项','进行中 '+decisions.open+' 项',0);
+  var personal='';
+  if (Policy.businessEnabled('staff_meal',me.hotelId)) personal+=enterBox('go-meal','员工餐申报','🍚','#faf4e9',0);
+  if (Policy.businessEnabled('restaurant',me.hotelId)&&TeamMeal.canArrange(me)) personal+=enterBox('tm-new','团餐发起','🍱','#faf4e9',0);
+  if(personal)html+='<div class="card" style="padding:10px 12px;margin-bottom:8px">'
+    +'<div class="t-sm t-w6">个人事务</div><div class="enter-grid">'+personal+'</div></div>';
   return html;
 }
 
 App.act('go-recurring-check',function(){ App.go('recurring?tab=check'); });
+App.act('gm-all-work',function(){ App.go('tasks?tab=mine'); });
 
 App.act('gm-manage', function () {
   App.sheet({
-    title: '管理与配置',
+    title: '门店设置',
     body: '<div class="list">'
-      + '<div class="li" data-act="go-org"><div class="grow"><div class="t-md">人员与权限</div><div class="t-xs c3 mt8">员工、岗位、能力、工作状态</div></div><div class="li-arrow">›</div></div>'
-      + '<div class="li" data-act="go-space"><div class="grow"><div class="t-md">空间与运营规则</div><div class="t-xs c3 mt8">房型、会议室、房间标准</div></div><div class="li-arrow">›</div></div>'
-      + '<div class="li" data-act="go-supply"><div class="grow"><div class="t-md">供应商与物资</div><div class="t-xs c3 mt8">供应商、物资库、价格</div></div><div class="li-arrow">›</div></div>'
-      + '<div class="li" data-act="go-recurring"><div class="grow"><div class="t-md">周期任务</div><div class="t-xs c3 mt8">例行巡检与固定任务规则</div></div><div class="li-arrow">›</div></div>'
-      + '<div class="li" data-act="go-cost"><div class="grow"><div class="t-md">运营成本</div><div class="t-xs c3 mt8">领用、维修、餐饮等现场成本</div></div><div class="li-arrow">›</div></div>'
-      + '<div class="li" data-act="go-meeting"><div class="grow"><div class="t-md">会议与跨部门协作</div><div class="t-xs c3 mt8">查看会议整体进度与准备异常</div></div><div class="li-arrow">›</div></div>'
+      + '<div class="li" data-act="go-space"><div class="grow"><div class="t-md">房间与场地</div><div class="t-xs c3 mt8">房型、房间标准、会议室</div></div><div class="li-arrow">›</div></div>'
+      + '<div class="li" data-act="go-supply"><div class="grow"><div class="t-md">采购与物资</div><div class="t-xs c3 mt8">供应商、物品、价格</div></div><div class="li-arrow">›</div></div>'
+      + '<div class="li" data-act="go-cost"><div class="grow"><div class="t-md">费用记录</div><div class="t-xs c3 mt8">维修、采购等费用</div></div><div class="li-arrow">›</div></div>'
+      + '<div class="li" data-act="go-meeting"><div class="grow"><div class="t-md">会议准备</div><div class="t-xs c3 mt8">会议进度、部门准备情况</div></div><div class="li-arrow">›</div></div>'
       + '</div>'
   });
 });
@@ -22098,7 +22085,7 @@ App.act('mat-toggle', function (el) {
  * ======================================================================= */
 
 App.page('recurring', {
-  title: '周期任务',
+  title: '安排巡检',
   render: function (r) {
     var me = Engine.Session.user();
     var canCreate = Policy.can(me, 'manage_recurring_task');
@@ -22133,27 +22120,27 @@ App.page('recurring', {
       { k: 'today', n: '待执行 ' + todayIns.filter(function(x){return x.status==='pending'||x.status==='doing';}).length },
       { k: 'check', n: '待验收 ' + awaiting.filter(function(x){return isGM||Recurring.canVerify(x,me);}).length },
       { k: 'done', n: '已完成 ' + completed.length }
-    ].concat(canViewHistory ? [{ k: 'rule', n: '任务规则 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
+    ].concat(canViewHistory ? [{ k: 'rule', n: '已安排 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
 
     if (tab === 'today') {
-      html += '<div class="card mt12"><div class="card-head"><div class="card-title">执行情况 · ' + U.ymd() + '</div></div>'
+      html += '<div class="card mt12" style="padding:9px 12px"><div class="card-head"><div class="card-title">巡检进度</div></div>'
         + '<div class="kpi-grid c3">'
         + '<div class="kpi"><div class="v">' + todayIns.filter(function(x){return x.status==='pending'||x.status==='doing';}).length + '</div><div class="k">待执行</div></div>'
         + '<div class="kpi"><div class="v c-blue">' + awaiting.length + '</div><div class="k">待验收</div></div>'
         + '<div class="kpi"><div class="v c-green">' + completed.length + '</div><div class="k">已完成</div></div>'
         + '</div>'
-        + '<div class="t-xs c3 mt12">到期只生成「待执行」，谁真正开始系统才记录谁 —— 不预先替现场派人。</div></div>';
+        + '</div>';
 
-      html += Comp.sectionTitle('待办清单');
+      html += Comp.sectionTitle('要执行的巡检');
       var pendingVisible = todayIns.filter(function(ins){return ins.status==='pending'||ins.status==='doing';});
-      if (!pendingVisible.length) html += Comp.empty('当前没有待执行任务；已提交的请到「待验收」，闭环的请到「已完成」', '✅');
+      if (!pendingVisible.length) html += Comp.empty('当前没有待执行的巡检', '✅');
       else html += '<div class="list">' + pendingVisible.map(function (ins) {
         return instRow(ins);
       }).join('') + '</div>';
     } else if (tab === 'check' || tab === 'done') {
       var records = (tab === 'check' ? awaiting.filter(function(x){return isGM || Recurring.canVerify(x,me);}) : completed)
         .sort(function(a,b){return (b.verifiedAt||b.doneAt||b.createdAt||0)-(a.verifiedAt||a.doneAt||a.createdAt||0);});
-      html += Comp.sectionTitle(tab==='check' ? '需要验收的执行记录' : '已完成的执行记录');
+      html += Comp.sectionTitle(tab==='check' ? '等待我验收' : '巡检完成记录');
       if (!records.length) html += Comp.empty(tab==='check'?'没有待验收任务':'暂无已完成任务', '✅');
       else html += '<div class="list">' + records.slice(0,60).map(function(ins) {
         return '<div class="li"><div class="grow"><div class="t-md t-w6">'+U.esc(ins.title)+'</div>'
@@ -22166,11 +22153,9 @@ App.page('recurring', {
           +'</div></div>';
       }).join('')+'</div>';
     } else {
-      html += '<div class="card mt12"><div class="card-head"><div class="card-title">任务规则与历史</div>'
-        + (canCreate ? '<div class="card-more" data-act="rt-create">＋ 新建 ›</div>' : '') + '</div>'
-        + '<div class="t-xs c3">' + (canCreate
-          ? '任务规则与每期执行留痕独立保存；创建后立即生成当天待执行实例。'
-          : '授权已撤销或过期：你创建的历史任务仍可查看，但不能再修改、停用或新建。') + '</div></div>';
+      html += '<div class="card mt12" style="padding:10px 12px"><div class="card-head"><div class="card-title">已安排的巡检</div>'
+        + (canCreate ? '<div class="card-more" data-act="rt-create">＋ 安排巡检 ›</div>' : '') + '</div>'
+        + (!canCreate ? '<div class="t-xs c3">你以前安排的巡检可查看，现已无权修改</div>' : '') + '</div>';
 
       if (!rules.length) html += Comp.empty('还没有周期任务规则', '🔁');
       else html += '<div class="list">' + rules.map(function (rt) {
@@ -22238,7 +22223,7 @@ App.act('rt-create', function () {
   if (!Policy.can(Engine.Session.user(), 'manage_recurring_task')) return U.toast('只有店长或授权人员可以配置周期任务');
   var depts = DB.all('departments').filter(function (d) { return d.id !== 'd_sup' && d.id !== 'd_dev' && Policy.canInDept(Engine.Session.user(), 'manage_recurring_task', d.id); });
   App.sheet({
-    title: '新建周期任务',
+    title: '安排巡检',
     body: '<div class="pad" style="padding:8px 16px">'
       + '<div class="frow"><div class="fn">任务名称</div><input class="inp" id="rt-title" placeholder="如：客房主管每日查房" style="flex:1;text-align:left"></div>'
       + '<div class="frow"><div class="fn">责任部门</div><select class="inp" id="rt-dept" style="flex:1;text-align:left">'
