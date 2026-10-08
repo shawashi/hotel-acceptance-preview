@@ -34,3 +34,28 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify live published acceptance page
+        env:
+          LIVE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          echo "Checking published acceptance page and release content."
+          for attempt in $(seq 1 16); do
+            if curl -fLsS --max-time 20 --retry 2 --retry-delay 2 --header 'Cache-Control: no-cache' "${LIVE_URL}?release=${GITHUB_SHA}" -o /tmp/hotelops-live.html; then
+              if cmp -s index.html /tmp/hotelops-live.html; then
+                python3 - <<'PY'
+          from pathlib import Path
+          body=Path('/tmp/hotelops-live.html').read_text(encoding='utf-8')
+          required=['acceptance-version','acceptance-bar','org-route-assign','DEV-006 组织赋权与任务路由专项版 [85d8b8b92677]']
+          for marker in required:
+              assert marker in body, f'Expected candidate marker missing: {marker}'
+          print(f'LIVE VERIFIED: exact index.html match, {len(body.encode())} bytes; UAT controls and DEV-006 revision present')
+          PY
+                exit 0
+              fi
+            fi
+            echo "Attempt ${attempt}: online content not yet matching committed index.html"
+            sleep 8
+          done
+          echo "Published page failed content check" >&2
+          exit 1
