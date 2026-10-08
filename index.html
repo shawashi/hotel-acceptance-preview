@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 10:46 · DEV-005 接单信息清晰化与住客扫码验收版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 11:15 · FIX-QR 前厅共享扫码接单修复版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -6985,6 +6985,8 @@ window.Engine = (function () {
       if (scope === 'dept') return t.deptId === u.deptId || t.creatorId === u.id || t.assigneeId === u.id;
       /* 部门共享池任务在整个处理周期内都对本部门具备对应能力的员工可见。
        * 未接单时可认领；有人接单后其他员工仍可查看“谁在处理中”，但不能重复操作。 */
+      if (t.type === 'guest_service' && (t.source === '住客扫码' || t.source === 'guest_qr') && t.guestRequestId
+          && Policy.can(u, 'frontdesk')) return true;
       if (t.poolCap && Policy.can(u, t.poolCap)) return true;
       if (!t.poolCap && t.poolDeptId && t.poolDeptId === u.deptId) return true;
       return t.creatorId === u.id || t.assigneeId === u.id || t.claimBy === u.id;
@@ -7048,7 +7050,9 @@ window.Engine = (function () {
       if (t.assigneeId && t.assigneeId !== (Session.me && Session.me.id)) return { ok: false, reason: '该任务已指派给其他员工' };
       if (!t.assigneeId && (t.poolDeptId || t.poolCap)) {
         var me = Session.me || {};
-        if (t.poolCap ? !Policy.can(me, t.poolCap) : me.deptId !== t.poolDeptId) {
+        var qrShared = t.type === 'guest_service' && (t.source === '住客扫码' || t.source === 'guest_qr') && t.guestRequestId
+          && Policy.can(me, 'frontdesk');
+        if (!qrShared && (t.poolCap ? !Policy.can(me, t.poolCap) : me.deptId !== t.poolDeptId)) {
           return { ok: false, reason: '你没有接手该共享任务所需的业务能力' };
         }
       }
@@ -10720,6 +10724,24 @@ window.Engine = (function () {
           dueAt: t.dueAt || 0, createdAt: t.createdAt || 0
         });
       });
+
+      /* 住客本人扫码的低风险送物：前厅与客房可竞争领取同一条共享任务。
+       * 只在真正可接单的 pending 阶段进入前厅待办；前厅代客发起的不开放自接。 */
+      if (Policy.can(me, 'frontdesk')) {
+        DB.find('tasks', function (t) {
+          return AuthContext.inScope(t) && t.type === 'guest_service'
+            && t.source === '住客扫码' && t.status === 'pending' && !t.assigneeId
+            && t.guestRequestId;
+        }).forEach(function (t) {
+          if (out.some(function (x) { return x.refType === 'task' && x.refId === t.id; })) return;
+          out.push({
+            id: 'task:' + t.id, refType: 'task', refId: t.id, kind: 'guest_service',
+            statusGroup: 'temporary', priority: t.priority || 'normal',
+            title: t.title, subtitle: (t.location || '') + ' · 住客扫码 · 可接单',
+            route: 'task/' + t.id, dueAt: t.dueAt || 0, createdAt: t.createdAt || 0
+          });
+        });
+      }
 
       /* 没有父 task 的工程工单也必须进入工程人员“我的工作”，不能只靠通知存在。 */
       if (Policy.can(me, 'maintain')) {
