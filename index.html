@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 10:21 · DEV-004 前厅客房临时任务极简派单版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 10:46 · DEV-005 接单信息清晰化与住客扫码验收版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -14530,6 +14530,21 @@ App.page('task', {
       + (t.result ? '<div class="mt12 t-sm" style="background:#f7f9fb;padding:10px 12px;border-radius:10px">处理结果：' + U.esc(t.result) + '</div>' : '')
       + '</div>';
 
+    /* 一线执行任务：把地点和具体指令放在操作按钮之前，而不是藏在任务信息折叠区。 */
+    var actualInstruction = String(t.desc || '').trim();
+    var guestTask = t.guestRequestId ? DB.byId('guestRequests', t.guestRequestId) : null;
+    if (!guestTask && t.guestRequestIds && t.guestRequestIds.length)
+      guestTask = DB.byId('guestRequests', t.guestRequestIds[0]);
+    if (guestTask && guestTask.content) actualInstruction = guestTask.content;
+    if (t.type === 'guest_service' || (t.type === 'housekeeping' && t.roomId) || t.type === 'room_inspection') {
+      var taskPlace = t.roomId ? DB.roomNo(t.roomId) + ' 房' : (t.location || '未填写位置');
+      html += '<div class="card" style="border:2px solid #d5e2f0;background:#f6f9fd">'
+        + '<div class="t-xs c2">📍 到哪里</div><div class="t-lg t-w6 mt8">' + U.esc(taskPlace) + '</div>'
+        + '<div class="t-xs c2 mt12">🧺 要做什么</div>'
+        + '<div class="t-lg t-w6 mt8" style="line-height:1.45;overflow-wrap:anywhere">' + U.esc(actualInstruction || t.title || '请查看任务要求') + '</div>'
+        + '</div>';
+    }
+
     /* 房间型客房任务：当前动作必须首屏可见。接单≠到房≠开始。 */
     if (isRoomCleanTask && t.status !== 'done' && t.status !== 'closed') {
       var roomActs = [];
@@ -15295,6 +15310,18 @@ App.page('wo', {
       + (over ? '<span class="chip chip-red">已超时</span>' : U.chip('wo', w.status)) + '</div>'
       + '<div class="t-xs c3 mt8">' + U.esc(w.code) + ' · 来源：' + U.esc(w.source) + '</div>'
       + (w.status !== 'done' && left ? '<div class="mt12 t-sm ' + left.cls + '">' + left.text + '</div>' : '')
+      + '</div>';
+
+    /* 执行优先：房号/地点、具体故障、应做事项首屏醒目呈现。
+     * 工单编号/耗时/报修人仍保留在下方历史与详情，不遮挡操作信息。 */
+    var workPlace = w.roomId ? DB.roomNo(w.roomId) + ' 房' : (w.location || '未填写位置');
+    var workDetail = String(w.reason || w.desc || '').trim();
+    var workName = String(w.title || w.issueTypeName || w.category || '现场维修').trim();
+    if (!workDetail) workDetail = workName;
+    html += '<div class="card" style="border:2px solid #d5e2f0;background:#f6f9fd">'
+      + '<div class="t-xs c2">📍 到哪里</div><div class="t-lg t-w6 mt8">' + U.esc(workPlace) + '</div>'
+      + '<div class="t-xs c2 mt12">🛠 要处理什么</div><div class="t-lg t-w6 mt8" style="line-height:1.45;overflow-wrap:anywhere">' + U.esc(workDetail) + '</div>'
+      + (workDetail !== workName ? '<div class="t-sm c2 mt8">事项：' + U.esc(workName) + '</div>' : '')
       + '</div>';
 
     /* 当前唯一/主要动作优先放首屏，详细信息和历史放后面。 */
@@ -22968,17 +22995,28 @@ function acceptanceBoot() {
 
   var bar = document.createElement('div');
   bar.className = 'acceptance-bar';
-  bar.innerHTML = '<div><b>人工验收测试版 · UAT 静默模式</b><span>定时任务/超时提醒已静默；独立验收数据保留，确认重置可恢复干净初始状态</span></div>'
-    + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><button id="acceptance-reset" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">重置验收数据</button>'
-    + '<button id="acceptance-pms-checkout" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">模拟 PMS 退房</button>'
-    + '<button id="acceptance-inspection-eng" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试查房→工程</button>'
-    + '<button id="acceptance-reclean" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试维修后复洁</button>'
-    + '<button id="acceptance-breakfast-close" type="button" style="padding:7px 10px;border:1px solid #b98700;border-radius:6px;background:#fff;cursor:pointer">快速测试早餐验收</button>'
-    + '<label>测试身份 <select id="acceptance-role">'
+  /* 当前 UAT 只保留身份切换与住客扫码模拟；历史测试捷径保留隐藏节点供旧监听器兼容。 */
+  bar.innerHTML = '<div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">'
+    + '<button id="acceptance-qr" type="button" style="padding:9px 12px;border:1px solid #b98700;border-radius:6px;background:#fff;font-weight:600;cursor:pointer">模拟住客扫码</button>'
+    + '<label style="margin-left:auto">测试身份 <select id="acceptance-role">'
     + AcceptanceTest.accounts.map(function (a) {
       return '<option value="' + a.id + '">' + U.esc(a.label) + '</option>';
-    }).join('') + '</select></label></div>';
+    }).join('') + '</select></label>'
+    + '<div style="display:none"><button id="acceptance-reset" type="button">重置验收数据</button>'
+    + '<button id="acceptance-pms-checkout" type="button">模拟 PMS 退房</button>'
+    + '<button id="acceptance-inspection-eng" type="button">快速测试查房→工程</button>'
+    + '<button id="acceptance-reclean" type="button">快速测试维修后复洁</button>'
+    + '<button id="acceptance-breakfast-close" type="button">快速测试早餐验收</button></div></div>';
   document.body.insertBefore(bar, document.body.firstChild);
+  document.getElementById('acceptance-qr').addEventListener('click', function () {
+    var no = window.prompt('请输入模拟扫码的房号（例如 509）：', '509');
+    if (no === null) return;
+    no = String(no).trim();
+    var room = DB.findOne('rooms', function (r) { return String(r.number) === no && AuthContext.checkScope(r).ok; });
+    if (!room) { U.toast('找不到本店房号：' + no); return; }
+    /* 客需页面使用 GuestReq.create({source:'guest_qr'})，与前厅代客发起严格区分。 */
+    App.go('guest?tab=qr&roomId=' + encodeURIComponent(room.id));
+  });
   var select = document.getElementById('acceptance-role');
   var resetBtn = document.getElementById('acceptance-reset');
   var pmsCheckoutBtn = document.getElementById('acceptance-pms-checkout');
