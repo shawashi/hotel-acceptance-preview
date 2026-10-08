@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 15:05 · DEV-006 组织赋权与任务路由专项版 [85d8b8b92677]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 16:34 · DEV-006 组织赋权与任务路由专项版 [436c003e039f]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -10980,6 +10980,23 @@ window.Engine = (function () {
         });
       }
 
+      /* DEV-006 回归：部门共享池周期任务必须出现在实际执行部门的“我的工作”。
+       * 仅展示当前可执行或实际待验收者，不把管理模板的权限当作执行权。 */
+      if (typeof Recurring !== 'undefined') {
+        Recurring.todoForDept('', U.ymd()).forEach(function(ins){
+          var execute=(ins.status==='pending'||ins.status==='doing') && Recurring.canExecute(ins,me);
+          var verify=ins.status==='waitcheck' && Recurring.canVerify(ins,me);
+          if(!execute && !verify)return;
+          out.push({
+            id:'recurring:'+ins.id,refType:'recurring',refId:ins.id,kind:'recurring',
+            statusGroup:verify?'confirm':ins.status==='doing'?'doing':'waiting',
+            priority:'normal',title:'周期任务 · '+ins.title,
+            subtitle:DB.deptName(ins.deptId)+' · '+(verify?'待验收':ins.status==='doing'?'待继续执行':'待认领执行'),
+            route:'recurring?tab=today',dueAt:ins.dueAt||0,createdAt:ins.createdAt||0
+          });
+        });
+      }
+
       /* 没有父 task 的工程工单也必须进入工程人员“我的工作”，不能只靠通知存在。 */
       if (Policy.can(me, 'maintain')) {
         DB.find('workOrders', function (w) {
@@ -17645,7 +17662,7 @@ App.page('org-grants', {
     /* 只展示服务层已完成授权范围守卫的能力，避免界面给出虚假安全承诺。 */
     var allowed = ['manage_recurring_task'];
     var active = DB.find('capabilityGrants',function (g) {
-      return AuthContext.inScope(g) && !g.revokedAt;
+      return AuthContext.inScope(g);
     }).sort(function(a,b){return b.grantedAt-a.grantedAt;});
     var html = '<div class="card mt12"><div class="card-title">授权给某一位员工</div>'
       + '<div class="t-xs c3 mt8">现已开放周期任务模板配置授权。其它特殊能力完成业务对象范围守卫后再开放；财务、任免等高风险权限不可委托。</div>'
@@ -17668,7 +17685,8 @@ App.page('org-grants', {
       return '<div class="li"><div class="grow"><div class="t-md t-w6">'+U.esc(DB.userName(g.userId))
         +' · '+U.esc(Policy.capName(g.capability))+'</div>'
         +'<div class="t-xs c3 mt8">范围：'+U.esc((g.scope&&g.scope.deptIds||[]).map(DB.deptName).join('、'))
-        +' · '+(valid?'有效':'已到期')+'</div></div>'
+        +' · '+(valid?'有效':(g.revokedAt?'已撤销 · '+U.ymd(g.revokedAt):'已到期'))
+        +(g.revokedAt?' · 撤销人：'+U.esc(DB.userName(g.revokedBy)):'')+'</div></div>'
         +(valid?'<div class="btn btn-ghost btn-sm" data-act="cg-revoke" data-id="'+U.esc(g.id)+'">撤权</div>':'')
         +'</div>';
     }).join(''):Comp.empty('暂无特殊能力授权'))+'</div>';
