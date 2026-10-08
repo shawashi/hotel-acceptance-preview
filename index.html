@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 16:34 · DEV-006 组织赋权与任务路由专项版 [436c003e039f]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 16:49 · DEV-006 组织赋权与任务路由专项版 [7b80474175b2]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -11755,22 +11755,30 @@ window.Recurring = (function () {
    * 幂等：同一 recurringTaskId + periodKey 只生成一次。
    * @return {Array} 本次新生成的实例
    */
-  function generateDue(ts) {
+  function generateDue(ts, onlyTemplateId, recoverMissedOnce) {
     ts = ts || Date.now();
     var dayKey = U.ymd(ts);
     var out = [];
     list({ activeOnly: true }).forEach(function (rt) {
-      if (!started(rt, ts)) return;
-      if (!dueToday(rt, ts)) return;
-      var key = rt.id + '@' + dayKey;
+      if (onlyTemplateId && rt.id !== onlyTemplateId) return;
+      /* Recover only a manually created one-off rule from a previous quiet UAT build.
+         Do not backfill daily/weekly seed templates or synthesize completed history. */
+      var recover = !!recoverMissedOnce && rt.frequency === 'once' &&
+        !!rt.firstDate && rt.firstDate <= dayKey &&
+        rt.createdBy && rt.createdBy !== 'sys';
+      if (recoverMissedOnce && !recover) return;
+      if (!recover && !started(rt, ts)) return;
+      if (!recover && !dueToday(rt, ts)) return;
+      var issueDay = recover ? rt.firstDate : dayKey;
+      var key = rt.id + '@' + issueDay;
       var exist = DB.findOne('taskInstances', function (x) { return inScope(x) && x.periodKey === key; });
       if (exist) return;
       /* assigneeMode=pool → 不指定个人，进部门任务池现场认领（§3.1 / §4） */
       var assigneeId = rt.assigneeMode === 'user' ? rt.assigneeId : '';
-      var dueAt = U.todayAt(rt.dueTime || '18:00');
+      var dueAt = recover ? new Date(issueDay + 'T' + (rt.dueTime || '18:00') + ':00').getTime() : U.todayAt(rt.dueTime || '18:00');
       var inst = DB.insert('taskInstances', AuthContext.stamp({
         id: U.uid('ti'),
-        recurringTaskId: rt.id, periodKey: key, date: dayKey,
+        recurringTaskId: rt.id, periodKey: key, date: issueDay,
         title: rt.title, deptId: rt.deptId, desc: rt.desc || '',
         assigneeMode: rt.assigneeMode || 'pool', assigneeRole: rt.assigneeRole || '',
         assigneeId: assigneeId, needAccept: rt.needAccept,
@@ -11780,7 +11788,7 @@ window.Recurring = (function () {
         createdAt: ts
       }));
       out.push(inst);
-      DB.update('recurringTasks', rt.id, { lastGenerated: dayKey });
+      DB.update('recurringTasks', rt.id, { lastGenerated: issueDay });
       /* 具体人的情况才单独通知；进任务池的由任务池统一推送 */
       if (assigneeId) {
         Engine.notify(assigneeId, {
@@ -22108,11 +22116,14 @@ App.page('recurring', {
     var me = Engine.Session.user();
     var canCreate = Policy.can(me, 'manage_recurring_task');
     var tab = r.params.tab || 'today';
-    if (tab === 'rule' && !canCreate) return Comp.empty('周期任务由店长配置；请从我的工作处理本期任务', '🔒');
+    var owned = Recurring.list({activeOnly:false}).filter(function(rt){return rt.createdBy===me.id;});
+    var canViewHistory = canCreate || owned.length > 0;
+    if (tab === 'rule' && !canViewHistory) return Comp.empty('周期任务由店长配置；请从我的工作处理本期任务', '🔒');
     var isGM = (me.roles || []).indexOf('gm') >= 0;
-    var rules = canCreate ? Recurring.list({ activeOnly: false }).filter(function (rt) {
-      return Policy.canInDept(me, 'manage_recurring_task', rt.deptId);
-    }) : [];
+    var rules = Recurring.list({ activeOnly: false }).filter(function (rt) {
+      return (canCreate && Policy.canInDept(me, 'manage_recurring_task', rt.deptId))
+        || rt.createdBy === me.id;
+    });
     /* 显式委托者只能查看授权范围内的模板与本人有权处理的实例，不因此获得全店列表。 */
     var all = Recurring.todoForDept('', U.ymd());
     var todayIns = all.filter(function (x) {
@@ -22125,7 +22136,7 @@ App.page('recurring', {
 
     var html = '<div class="pad mt12">' + Comp.seg([
       { k: 'today', n: '今日待执行 ' + todayIns.length }
-    ].concat(canCreate ? [{ k: 'rule', n: '周期规则 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
+    ].concat(canViewHistory ? [{ k: 'rule', n: '周期规则 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
 
     if (tab === 'today') {
       html += '<div class="card mt12"><div class="card-head"><div class="card-title">待执行与往期未完成（' + U.ymd() + '）</div></div>'
@@ -22145,8 +22156,8 @@ App.page('recurring', {
       html += '<div class="card mt12"><div class="card-head"><div class="card-title">周期任务规则</div>'
         + (canCreate ? '<div class="card-more" data-act="rt-create">＋ 新建 ›</div>' : '') + '</div>'
         + '<div class="t-xs c3">' + (canCreate
-          ? '每天 / 每周 / 每月自动生成本期待执行任务；到期只产生「待做」，不产生「已做」。'
-          : '你没有「周期任务配置」权限。店长与获授权人员使用同一模板入口，管理范围由个人授权决定。') + '</div></div>';
+          ? '任务规则与每期执行留痕独立保存；创建后立即生成当天待执行实例。'
+          : '授权已撤销或过期：你创建的历史任务仍可查看，但不能再修改、停用或新建。') + '</div></div>';
 
       if (!rules.length) html += Comp.empty('还没有周期任务规则', '🔁');
       else html += '<div class="list">' + rules.map(function (rt) {
@@ -22248,14 +22259,16 @@ App.act('rt-create-save', function () {
     assigneeMode: 'pool'
   });
   if (!res.ok) { U.toast(res.reason); return; }
-  Recurring.generateDue();
-  DB.flush(); App.closeSheet(); U.toast('周期任务已创建');
+  var generated = Recurring.generateDue(Date.now(), res.task.id);
+  DB.flush(); App.closeSheet();
+  U.toast(generated.length ? '已创建并派入责任部门任务池' : '规则已保存，本期未生成，请检查执行日期');
   App.go('recurring?tab=rule');
 });
 
 App.act('rt-open', function (el) {
-  if (!Policy.can(Engine.Session.user(), 'manage_recurring_task')) return U.toast('无权查看周期规则');
   var rt = Recurring.byId(el.getAttribute('data-id'));
+  var me = Engine.Session.user();
+  if (!rt || !(rt.createdBy===me.id || Policy.canInDept(me,'manage_recurring_task',rt.deptId))) return U.toast('无权查看该周期规则');
   if (!rt) return;
   var hist = Recurring.historyOf(rt.id).slice(0, 30);
   App.sheet({
@@ -22274,8 +22287,10 @@ App.act('rt-open', function (el) {
             + '</div></div>';
         }).join('') + '</div>'
         : Comp.empty('还没有到期的执行记录', '🔁'))
-      + '<div class="pad mt12"><div class="btn btn-block btn-ghost" data-act="rt-toggle" data-id="' + rt.id + '">'
-      + (rt.active !== 0 ? '停用该周期任务' : '启用该周期任务') + '</div></div>'
+      + (Policy.canInDept(me,'manage_recurring_task',rt.deptId)
+        ? '<div class="pad mt12"><div class="btn btn-block btn-ghost" data-act="rt-toggle" data-id="' + rt.id + '">'
+          + (rt.active !== 0 ? '停用该周期任务' : '启用该周期任务') + '</div></div>'
+        : '<div class="t-xs c3 pad mt12">仅历史查看 · 当前没有修改权限</div>')
   });
 });
 App.act('rt-toggle', function (el) {
@@ -23276,7 +23291,9 @@ App.act('cost-drill', function (el) {
   Engine.boot = function () {};
   Engine.Inspection.ensureToday = function () {};
   Engine.Escalate.tick = function () { return false; };
-  Recurring.generateDue = function () { return []; };
+  /* Preserve manually submitted recurring execution: disabling this function made UAT templates
+   * appear saved while silently dropping the real department work instances.
+   * Background schedule remains muted through Engine.boot; explicit submit remains live. */
   Maintenance.generateDue = function () { return []; };
   GuestReq.escalate = function () { return 0; };
   Pool.reclaim = function () { return 0; };
@@ -23417,6 +23434,12 @@ function acceptanceBoot() {
       if (wo && wo.status === 'done') RoomSvc.repairResolved(rt.id, wo.id, wo.result || rt.result || '已修复');
     }
   });
+  /* Recover previously saved manual one-off rules whose instances were muted by older UAT runtime.
+     The original rule/date remains unchanged, and the period key enforces single generation. */
+  var recoveredOneOff = Recurring.generateDue(Date.now(), null, true);
+  if (recoveredOneOff.length) {
+    Engine.log('验收补齐人工创建的一次性任务实例', String(recoveredOneOff.length));
+  }
   DB.flush();
 
   var bar = document.createElement('div');
