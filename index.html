@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 20:16 · DEV-006 组织赋权与任务路由专项版 [ee956cea790b]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 20:28 · DEV-006 组织赋权与任务路由专项版 [3ce2ae7f3676]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -22246,8 +22246,8 @@ App.act('rt-create', function () {
       + '<div class="frow"><div class="fn">每日截止</div><input class="inp" id="rt-due" type="time" value="18:00" style="width:120px"></div>'
       + '<div class="frow"><div class="fn">是否需要验收</div>'
       + '<div class="row" style="gap:8px">'
-      + '<div class="btn btn-xs btn-ghost" data-act="rt-flag" data-t="need" data-v="1">需验收</div>'
-      + '<div class="btn btn-xs btn-green" data-act="rt-flag" data-t="need" data-v="0">不需</div>'
+      + '<div class="btn btn-xs btn-ghost" data-act="rt-flag" data-t="need" data-v="1" role="radio" aria-checked="false">需验收</div>'
+      + '<div class="btn btn-xs btn-green" data-act="rt-flag" data-t="need" data-v="0" role="radio" aria-checked="true">不需验收</div>'
       + '</div></div>'
       + '<input type="hidden" id="rt-need" value="0">'
       + '<div class="t-xs c3 mt8">负责人留空 = 到期进部门任务池，谁有空谁接；这是绝大多数现场任务的真实做法。</div>'
@@ -22257,8 +22257,16 @@ App.act('rt-create', function () {
   });
 });
 App.act('rt-flag', function (el) {
-  document.getElementById('rt-need').value = el.getAttribute('data-v');
-  U.toast(el.getAttribute('data-v') === '1' ? '完成后需验收' : '完成后直接闭环');
+  var selected = el.getAttribute('data-v');
+  document.getElementById('rt-need').value = selected;
+  /* Keep visual state and persisted value in sync, including switching back. */
+  var choices = document.querySelectorAll('[data-act="rt-flag"][data-t="need"]');
+  Array.prototype.forEach.call(choices, function (btn) {
+    var active = btn.getAttribute('data-v') === selected;
+    btn.classList.toggle('btn-green', active);
+    btn.classList.toggle('btn-ghost', !active);
+    btn.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
 });
 App.act('rt-create-save', function () {
   var res = Recurring.create({
