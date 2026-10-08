@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-07 23:55 · 多链路真实待办与发起人回看回归版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 09:32 · 全局留痕与已完成记录回归版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -2414,7 +2414,7 @@ window.Policy = (function () {
       d_eng: ['maintain', 'purchase_eng'],
       d_fb: ['catering'],
       d_fin: ['finance', 'approve_purchase', 'view_stats', 'view_cost'],
-      d_pur: ['approve_purchase', 'purchase_food', 'purchase_eng', 'purchase_order', 'view_stats', 'view_cost'],
+      d_pur: ['approve_purchase', 'purchase_food', 'purchase_eng', 'purchase_order', 'view_stats'],
       d_gm: ['manage_org', 'approve_purchase', 'view_stats', 'view_cost', 'decision', 'manage_space', 'manage_supplier', 'dispatch_housekeeping',
         'manage_recurring_task', 'manage_item_price'],
       d_sales: ['sales', 'arrange_team_meal']
@@ -2425,7 +2425,7 @@ window.Policy = (function () {
       /* V4.3.1 §2.2：主管 = 本部门一线能力 ∪ 在岗/主管附加能力 ∪ 店长个人授权。
          manager 只叠加管理能力，绝不包含一线能力本身（一线能力来自部门 + 岗位），
          这样「成为主管」永远不会覆盖或删掉员工的一线能力。 */
-      manager: ['view_stats', 'view_cost'],
+      manager: ['view_stats'],
       /* 店长同时持有采购下单、验收、物资库与团餐能力：保证门店在没人配置时仍能运转
        * V4.3.1 §2.1：店长是门店最高经营管理员，采购、验收、供应商、价格、周期任务均可由其掌控 */
       gm: ['manage_org', 'approve_purchase', 'view_stats', 'view_cost', 'decision', 'manage_space', 'manage_supplier',
@@ -2525,7 +2525,17 @@ window.Policy = (function () {
     /* V4.3.1：嵌套字典（rules / deptCaps / roleCaps / postCaps / presence）
        做深补齐，新增配置项对老数据也能生效，避免换版本后规则静默失效 */
     var deepChanged = deepFill(s.v, DEFAULT);
-    if (deepChanged) DB.update('settings', KEY, { v: s.v });
+    /* DEV-003: 旧门店已保存的 roleCaps.manager / deptCaps.d_pur 可能仍含
+     * view_cost。新默认值不能覆盖这些旧值，需显式且幂等地收紧默认继承。
+     * 若确需查看经营成本，应以 capsAdd 单独授予具体人员。 */
+    function stripLegacyCost(list) {
+      if (!Array.isArray(list) || list.indexOf('view_cost') < 0) return false;
+      list.splice(list.indexOf('view_cost'), 1);
+      return true;
+    }
+    var legacyChanged = stripLegacyCost(s.v.roleCaps.manager);
+    if (stripLegacyCost(s.v.deptCaps.d_pur)) legacyChanged = true;
+    if (deepChanged || legacyChanged) DB.update('settings', KEY, { v: s.v });
     return s.v;
   }
   /** 把 def 中目标对象缺失的键补进去（递归一层即可，本配置只有两层） */
@@ -2633,6 +2643,8 @@ window.Policy = (function () {
       || DB.findOne('storeCapabilities', function (x) { return x.hotelId === hid; });
     var over = rec ? (rec.capabilities || {}) : ((c.businessCapabilitiesByHotel || {})[hid] || {});
     Object.keys(over).forEach(function (k) { base[k] = over[k]; });
+    /* 前厅/客房/工程为固定业务底座；人员或部门可以缺省，业务不可随岗位缺省关闭。 */
+    ['room_service', 'housekeeping', 'maintenance'].forEach(function (k) { base[k] = true; });
     return base;
   }
   function businessEnabled(key, hotelId) {
@@ -2645,6 +2657,8 @@ window.Policy = (function () {
   }
   function setBusinessCapability(key, enabled) {
     if (BUSINESS_FEATURES.indexOf(key) < 0) return fail('未知门店业务能力：' + key);
+    if (enabled === false && ['room_service','housekeeping','maintenance'].indexOf(key) >= 0)
+      return fail('前厅/客房/工程属于基础业务，不能关闭；可以调整责任人员与显示入口');
     var me = (typeof Engine !== 'undefined' && Engine.Session) ? Engine.Session.me : null;
     var guard = (typeof ServiceGuard !== 'undefined')
       ? ServiceGuard.check({ hotelId: AuthContext.scope().hotelId, action: 'store-capability.write', scope: 'config', capability: 'manage_org', write: true })
@@ -10872,6 +10886,28 @@ window.Engine = (function () {
         });
       }
 
+      /* 周期任务到期后是普通现场行动，不要求员工到“配置周期任务”页面找。
+       * 这里只投放本人可执行或有验收职责的实例，不暴露其他部门的任务清单。 */
+      if (typeof Recurring !== 'undefined' && Recurring.todoForDept) {
+        Recurring.todoForDept('', U.ymd()).forEach(function (ins) {
+          var execute = Recurring.canExecute(ins, me);
+          var verify = ins.status === 'waitcheck' && Recurring.canVerify(ins, me);
+          if (!execute && !verify) return;
+          /* 等待别人验收只是执行人的进度，不是他当前需要处理的工作。 */
+          if (ins.status === 'waitcheck' && !verify) return;
+          if (ins.status === 'done') return;
+          var group = ins.status === 'doing' ? 'doing'
+            : ins.status === 'waitcheck' ? 'confirm'
+            : 'waiting';
+          out.push({
+            id: 'recurring:' + ins.id, refType: 'recurring', refId: ins.id, kind: 'recurring',
+            statusGroup: group, priority: 'normal', title: '例行工作 · ' + ins.title,
+            subtitle: ins.status === 'waitcheck' ? '待验收' : (ins.status === 'doing' ? '已开始 · 继续处理' : '待执行 · ' + (ins.dueTime || '')),
+            route: 'recurring?tab=today', dueAt: ins.dueAt || 0, createdAt: ins.createdAt || 0
+          });
+        });
+      }
+
       /* 接班是前厅当前班次的即时工作，不应只藏在消息中心。 */
       DB.find('handovers', function (h) {
         return AuthContext.inScope(h) && h.toUserId === me.id && h.status === 'pending';
@@ -11262,14 +11298,36 @@ window.Recurring = (function () {
   /* ---------------- 服务层守卫 ---------------- */
   function denyFor(rt) {
     var me = Engine.Session.me;
-    if (!me || !me.id) return { ok: false, reason: '未登录，无法操作周期任务' };
-    if ((me.status || 'active') === 'leave') return { ok: false, reason: '账号已离职，不能操作周期任务' };
-    if ((me.roles || []).indexOf('developer') >= 0) return { ok: false, reason: '开发者账号不能参与经营业务' };
-    if ((me.roles || []).indexOf('supplier') >= 0) return { ok: false, reason: '供应商账号不能操作店内周期任务' };
-    /* 默认店长；被授权的主管可以创建本部门的周期任务（§8：前厅执行本部门周期任务） */
-    if (Policy.can(me, 'manage_recurring_task')) return null;
-    if (rt && rt.deptId && rt.deptId === me.deptId && Policy.isSupervisor(me)) return null;
-    return { ok: false, reason: '你没有「周期任务配置」权限；跨部门/制度性周期任务默认由店长创建' };
+    var denied = Policy.deny('manage_recurring_task', me, '周期任务模板只能由店长或被显式授权的人员维护');
+    if (denied) return denied;
+    /* 主管即使获得管理模板的显式授权，仍只能维护自己部门的模板。 */
+    var isGM = (me.roles || []).indexOf('gm') >= 0;
+    if (!isGM && (!rt || !rt.deptId || rt.deptId !== me.deptId))
+      return { ok: false, reason: '授权仅限本部门周期任务' };
+    return null;
+  }
+
+  function canExecute(ins, user) {
+    var me = user || Engine.Session.me;
+    if (!ins || !me || !AuthContext.checkScope(me).ok || (me.status || 'active') === 'leave') return false;
+    if ((me.roles || []).some(function (r) { return r === 'supplier' || r === 'developer' || r === 'investor'; })) return false;
+    if (ins.actualAssigneeId) return ins.actualAssigneeId === me.id;
+    if (ins.assigneeId) return ins.assigneeId === me.id;
+    if ((me.roles || []).indexOf('gm') >= 0) return true;
+    if (ins.deptId !== me.deptId) return false;
+    /* 岗位模式不能退化成整个部门可领取；岗位名/角色都支持。 */
+    if (ins.assigneeMode === 'role' && ins.assigneeRole)
+      return ins.assigneeRole === me.post || (me.roles || []).indexOf(ins.assigneeRole) >= 0;
+    return true;
+  }
+
+  function canVerify(ins, user) {
+    var me = user || Engine.Session.me;
+    return !!(ins && me && AuthContext.checkScope(me).ok
+      && (me.status || 'active') !== 'leave'
+      && ((me.roles || []).indexOf('gm') >= 0
+        || Engine.deptHead(ins.deptId) === me.id
+        || (Policy.can(me, 'manage_recurring_task') && ins.deptId === me.deptId)));
   }
 
   /* ---------------- 查询 ---------------- */
@@ -11330,6 +11388,11 @@ window.Recurring = (function () {
     if (!rt) return { ok: false, reason: '周期任务不存在或不属于当前门店' };
     var g = denyFor(rt);
     if (g) return g;
+    if (patch.deptId && patch.deptId !== rt.deptId) {
+      var moveDenied = denyFor(patch);
+      if (moveDenied) return moveDenied;
+    }
+    /* 模板不能改写已经生成的实例。 */
     DB.update('recurringTasks', id, patch);
     Engine.Audit.write({
       targetType: 'recurringTask', targetId: id, targetName: rt.title, action: '修改周期任务',
@@ -11374,6 +11437,7 @@ window.Recurring = (function () {
         id: U.uid('ti'),
         recurringTaskId: rt.id, periodKey: key, date: dayKey,
         title: rt.title, deptId: rt.deptId, desc: rt.desc || '',
+        assigneeMode: rt.assigneeMode || 'pool', assigneeRole: rt.assigneeRole || '',
         assigneeId: assigneeId, needAccept: rt.needAccept,
         dueAt: dueAt, dueMin: rt.dueMin, dueTime: rt.dueTime,
         status: 'pending', actualAssigneeId: '', startAt: 0, doneAt: 0,
@@ -11398,7 +11462,8 @@ window.Recurring = (function () {
   function todoForDept(deptId, dateKey) {
     var dk = dateKey || U.ymd();
     return DB.find('taskInstances', function (x) {
-      return inScope(x) && x.date === dk && x.status !== 'done' && (!deptId || x.deptId === deptId);
+      /* 到期未完成事项即使跨天/跨班也继续存在，不能在第二天无声消失。 */
+      return inScope(x) && x.date <= dk && x.status !== 'done' && (!deptId || x.deptId === deptId);
     });
   }
   function historyOf(recurringTaskId) {
@@ -11417,7 +11482,9 @@ window.Recurring = (function () {
     if (!ins) return { ok: false, reason: '该期任务不存在或不属于当前门店' };
     var me = Engine.Session.me;
     if (!me || !me.id) return { ok: false, reason: '未登录' };
-    if (ins.status === 'done') return { ok: false, reason: '该期任务已完成' };
+    if (ins.status !== 'pending' && !(ins.status === 'doing' && ins.actualAssigneeId === me.id))
+      return { ok: false, reason: '当前状态不能开始执行' };
+    if (!canExecute(ins, me)) return { ok: false, reason: '你不是本期任务的授权执行人' };
     if (ins.actualAssigneeId && ins.actualAssigneeId !== me.id) {
       return { ok: false, reason: '该期任务已由 ' + DB.userName(ins.actualAssigneeId) + ' 开始执行' };
     }
@@ -11433,7 +11500,8 @@ window.Recurring = (function () {
     if (!ins) return { ok: false, reason: '该期任务不存在或不属于当前门店' };
     var me = Engine.Session.me;
     if (!me || !me.id) return { ok: false, reason: '未登录' };
-    if (ins.status === 'done') return { ok: false, reason: '该期任务已完成' };
+    if (ins.status !== 'doing' || ins.actualAssigneeId !== me.id || !canExecute(ins, me))
+      return { ok: false, reason: '只有已开始本期任务的实际执行人可以完成' };
     var now = Date.now();
     DB.update('taskInstances', id, {
       status: ins.needAccept ? 'waitcheck' : 'done',
@@ -11450,9 +11518,7 @@ window.Recurring = (function () {
     if (!ins) return { ok: false, reason: '该期任务不存在或不属于当前门店' };
     var me = Engine.Session.me;
     if (ins.status !== 'waitcheck') return { ok: false, reason: '当前状态无需验收' };
-    if (!(Engine.deptHead(ins.deptId) === me.id || Policy.can(me, 'manage_recurring_task'))) {
-      return { ok: false, reason: '只有本部门负责人或周期任务负责人可以验收' };
-    }
+    if (!canVerify(ins, me)) return { ok: false, reason: '只有店长、部门负责人或明确授权人员可以验收' };
     DB.update('taskInstances', id, {
       status: pass ? 'done' : 'doing',
       verifiedBy: me.id, verifiedAt: Date.now(),
@@ -11465,7 +11531,7 @@ window.Recurring = (function () {
     FREQ: FREQ, WEEK: WEEK, freqName: freqName, periodKey: periodKey,
     dueToday: dueToday, list: list, byId: byId, create: create, update: update, toggle: toggle,
     generateDue: generateDue, todoForDept: todoForDept, historyOf: historyOf, instance: instance,
-    start: start, finish: finish, verify: verify
+    start: start, finish: finish, verify: verify, canExecute: canExecute, canVerify: canVerify
   };
 })();
 </script>
@@ -11842,10 +11908,20 @@ window.GuestReq = (function () {
     var room = DB.byId('rooms', o.roomId);
     if (!room) return { ok: false, reason: '房间不存在：' + o.roomId };
     if (!o.content && !o.type) return { ok: false, reason: '请描述你需要什么服务' };
+    /* 所有住客请求必须继承真实房间 tenant/hotel 范围。此前未带 tenantId 的记录
+     * 会被严格的历史查询与工程完成同步过滤，造成“已完成”记录丢失。 */
+    if (!room.hotelId || !room.tenantId) return { ok: false, reason: '房间未关联有效门店' };
+    if (o.directResolve) {
+      var actor = Engine.Session.me;
+      if (!actor || !Policy.can(actor, 'frontdesk') || !AuthContext.checkScope(room).ok)
+        return { ok: false, reason: '只有本店前厅可登记现场/机器人完成' };
+      if (tp.dept !== 'd_hk' || tp.repair)
+        return { ok: false, reason: '设施设备问题必须进入工程处理' };
+    }
 
     var now = Date.now();
     var req = DB.insert('guestRequests', {
-      id: U.uid('gq'), hotelId: hotelId(),
+      id: U.uid('gq'), hotelId: room.hotelId, tenantId: room.tenantId,
       code: 'FW' + U.ymd().replace(/-/g, '') + '-' + U.pad2(DB.nextSeq('FW')),
       roomId: o.roomId, roomNo: room.number, floor: room.floor || '', zone: room.zone || '',
       guestRequestType: tp.key, typeName: tp.name, content: o.content || tp.name,
@@ -12610,6 +12686,9 @@ window.Cost = (function () {
 
   /** 完整看板：本期 + 上期 + 环比，页面直接渲染 */
   function board(key, custom) {
+    /* 运营成本是经营敏感数据：读取分析结果同样必须通过服务层守卫。 */
+    var auth = ServiceGuard.check({ action: 'cost.read', scope: 'cost', capability: 'view_cost' });
+    if (!auth.ok) return { ok: false, reason: auth.reason };
     var rg = range(key, custom);
     var cur = summary(rg);
     var prev = summary(rg.prev);
@@ -12626,6 +12705,8 @@ window.Cost = (function () {
 
   /** 某单项物资：期间用量与每房晚用量（§11.2 单项物资每房晚用量） */
   function itemPerNight(rg, materialName) {
+    var auth = ServiceGuard.check({ action: 'cost.read', scope: 'cost', capability: 'view_cost' });
+    if (!auth.ok) return { ok: false, reason: auth.reason, list: [] };
     var recs = DB.find('issueRecords', function (r) {
       return r.materialName === materialName && r.date >= rg.from && r.date <= rg.to;
     });
@@ -13758,14 +13839,10 @@ function inspectionMineCard(me) {
  * 普通员工首页：4—6 个入口 + 今日待办一键完成
  * ======================================================================= */
 function homeStaff(me) {
-  var myTasks = Engine.Task.homeQueue(me.id);
   var myWork = Engine.MyWork ? Engine.MyWork.list(me.id) : [];
   var hkAvailableTaskIds = {};
   var hour = new Date().getHours();
   var greet = hour < 6 ? '夜班辛苦了' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
-  var unread = DB.find('notifications', function (n) {
-    return n.userId === me.id && !n.read && (!Engine.notificationIsActionable || Engine.notificationIsActionable(n));
-  }).length;
 
   /* ---- 头部 ---- */
   var html = '<div class="row-b pad" style="padding-top:18px">'
@@ -13856,26 +13933,8 @@ function homeStaff(me) {
   if (moreOps.length) html += '<details class="card"><summary class="card-title">更多业务（' + moreOps.length + '）</summary>'
     + '<div class="enter-grid mt12">' + moreOps.map(function (o) { return enterBox(o.k, o.n, o.i, o.bg, 0); }).join('') + '</div></details>';
 
-  /* ---- 我的消息（只显示需要本人处理的） ---- */
-  var msgs = DB.find('notifications', function (n) {
-    return n.userId === me.id && !n.read && (!Engine.notificationIsActionable || Engine.notificationIsActionable(n));
-  })
-    .sort(function (a, b) { return b.createdAt - a.createdAt; }).slice(0, 3);
-  html += '<div class="card"><div class="card-head"><div class="card-title">需要我处理'
-    + (unread ? ' <span class="chip chip-red">' + unread + '</span>' : '') + '</div>'
-    + '<div class="card-more" data-act="tab" data-k="message">全部 ›</div></div>';
-  if (msgs.length) {
-    html += msgs.map(function (n) {
-      return '<div class="li" style="padding:12px 0" data-act="open-notice" data-id="' + n.id + '">'
-        + '<div class="grow"><div class="t-md t-w6">' + U.esc(n.title) + '</div>'
-        + '<div class="t-xs c2 mt8">' + U.esc(n.content) + '</div>'
-        + '<div class="t-xs c3 mt8">' + U.relTime(n.createdAt) + '</div></div>'
-        + '<div class="li-arrow">›</div></div>';
-    }).join('');
-  } else {
-    html += Comp.empty('暂无需要处理的事项', '🔔');
-  }
-  html += '</div>';
+  /* 消息归消息页；操作事项仅从上方唯一“我的工作”进入。
+   * 不再把同一项通知生成第二份“需要我处理”任务卡。 */
   return html;
 }
 
@@ -13923,7 +13982,7 @@ function staffEntries(u) {
   if (Policy.businessEnabled('food_purchase', u.hotelId) && Policy.can(u, 'accept_food')) add('go-purchase', '食材验收', '📦', '#faf4e9');
   if (Policy.businessEnabled('maintenance', u.hotelId) && Policy.can(u, 'purchase_eng')) add('go-apply', '维修物资', '🔧', '#f1f3f6');
   if (Policy.can(u, 'dispatch_housekeeping') && !Policy.can(u, 'frontdesk')) add('go-guest-internal', '客房临时任务', '🧺', '#f0ecfd');
-  if (Policy.can(u, 'manage_recurring_task')) add('go-recurring', '周期任务', '🔁', '#eaf1fd');
+  if (Policy.can(u, 'manage_recurring_task')) add('go-recurring', '周期任务配置', '🔁', '#eaf1fd');
   if (Policy.can(u, 'view_cost') && Policy.isSupervisor(u) && !Policy.can(u, 'sales')) add('go-cost', '运营成本', '💰', '#faf4e9');
 
   return ops;
@@ -13931,178 +13990,55 @@ function staffEntries(u) {
 /* 前厅核心责任显式优先；更多业务保留全部已授权能力。 */
 function staffEntryGroups(u) {
   var ops = staffEntries(u);
+  /* 工作台根据实际职责排列；能力权限负责可达，不等于全部常驻首页。 */
   var core = Policy.can(u, 'frontdesk')
-    ? ['go-meal', 'go-guest', 'go-breakfast-forecast', 'tm-new', 'go-handover'] : [];
-  var primary = core.map(function (k) { return ops.find(function (o) { return o.k === k; }); }).filter(Boolean);
-  var lowFrequency = ['go-catering-close-history'];
-  var rest = ops.filter(function (o) { return core.indexOf(o.k) < 0 && lowFrequency.indexOf(o.k) < 0; });
-  var low = ops.filter(function (o) { return lowFrequency.indexOf(o.k) >= 0; });
-  var extra = [];
-  /* 前厅主管仅叠加低频管理入口，去重后统一收进更多业务。 */
-  if (core.length && Policy.isSupervisor(u)) {
+    ? ['go-guest', 'go-handover', 'go-breakfast-forecast', 'tm-new', 'go-meal']
+    : Policy.can(u, 'sales') && !Policy.can(u, 'frontdesk')
+      ? ['sl-new', 'mt-reserve-new', 'tm-new', 'go-meal']
+      : Policy.can(u, 'maintain')
+        ? ['go-mywo', 'go-apply', 'go-meal']
+        : Policy.can(u, 'clean') || Policy.can(u, 'inspect')
+          ? ['go-hk', 'go-hk-inspect', 'go-meal']
+          : ['go-breakfast-close', 'go-team-meals', 'go-food-apply', 'go-meal'];
+  var primary = core.map(function (k) {
+    return ops.find(function (x) { return x.k === k; });
+  }).filter(Boolean);
+  var more = ops.filter(function (x) {
+    return !primary.some(function (p) { return p.k === x.k; });
+  });
+  if (Policy.isSupervisor(u)) {
     var management = [
-      { k: 'go-coordinate', n: '跨部门协作', i: '📨', bg: '#eaf1fd' },
-      { k: 'go-sop', n: '定时任务', i: '⏰', bg: '#f0ecfd' },
-      { k: 'open-incident', n: '异常中心', i: '⚠️', bg: '#fdecec' }
+      { k: 'open-incident', n: '本部门异常', i: '⚠️', bg: '#fdecec' }
     ];
-    if (Policy.can(u, 'approve_purchase') || Engine.Purchase.pendingFor(u.id).length) management.push({ k: 'open-approval', n: '待我审批', i: '🧾', bg: '#faf4e9' });
-    if (Policy.can(u, 'view_stats')) management.push({ k: 'go-stats', n: '数据', i: '📊', bg: '#f1f3f6' });
-    if (Engine.Purchase.kindsFor(u.id).length) management.push({ k: 'go-purchase', n: '采购台账', i: '🛒', bg: '#f0ecfd' });
-    management.forEach(function (o) { if (!ops.some(function (x) { return x.k === o.k; })) extra.push(o); });
+    if (Policy.can(u, 'approve_purchase') || Engine.Purchase.pendingFor(u.id).length)
+      management.push({ k: 'open-approval', n: '待我审批', i: '🧾', bg: '#faf4e9' });
+    management.forEach(function (x) {
+      if (!primary.concat(more).some(function (o) { return o.k === x.k; })) more.push(x);
+    });
   }
-  var count = Math.max(0, 6 - primary.length);
-  return { primary: primary.concat(rest.slice(0, count)), more: rest.slice(count).concat(low, extra) };
+  /* 高频目标为 3–5；少量额外一线能力保留在“更多业务”，不机械截断丢功能。 */
+  var lowFrequency = ['go-catering-close-history'];
+  var high = more.filter(function (x) { return lowFrequency.indexOf(x.k) < 0; });
+  var low = more.filter(function (x) { return lowFrequency.indexOf(x.k) >= 0; });
+  var slots = Math.max(0, 5 - primary.length);
+  return { primary: primary.concat(high.slice(0, slots)), more: high.slice(slots).concat(low) };
 }
 /* ==========================================================================
  * 部门负责人首页
  * ======================================================================= */
 function homeManager(me) {
-  if (Policy.can(me, 'frontdesk')) return homeStaff(me);
-  if (me.deptId !== 'd_hk') return homeManagerLegacy(me);
-  var deptId = me.deptId;
-  var allToday = Engine.Task.todayAll().filter(function (t) { return t.deptId === deptId; });
-  var done = allToday.filter(function (t) { return t.status === 'done' || t.status === 'closed'; }).length;
-  var open = allToday.length - done;
-  var overdue = allToday.filter(Engine.Task.isOverdue).length;
-  var pending = Engine.Purchase.pendingFor(me.id);
-  var inc = Engine.Incident.byDept(deptId);
-  var isHK = deptId === 'd_hk';
-  var attentionNotices = DB.find('notifications', function (n) {
-    if (n.userId !== me.id || n.read) return false;
-    if (!isHK) return true;
-    var t = n.refType === 'task' ? DB.byId('tasks', n.refId) : null;
-    if (t && t.deptId === 'd_hk' && t.standardRoomPool && t.cleanType !== 'repair_reclean') return false;
-    return n.type === 'escalate' || n.type === 'approve' || (t && (t.priority === 'urgent' || t.cleanType === 'repair_reclean'));
-  }).sort(function (a, b) { return b.createdAt - a.createdAt; });
-
-  var html = '<div class="hero" style="padding:20px">'
-    + '<div class="hero-title">' + U.esc(DB.deptName(deptId)) + ' · 今日进度</div>'
-    + '<div class="hero-sub">' + U.md() + ' ' + U.weekdayCN() + ' · ' + U.esc(me.name) + '</div>'
-    + '<div class="hero-kpis">'
-    + '<div class="hero-kpi"><div class="v">' + done + '/' + allToday.length + '</div><div class="k">已完成</div></div>'
-    + '<div class="hero-kpi"><div class="v">' + open + '</div><div class="k">待完成</div></div>'
-    + '<div class="hero-kpi"><div class="v" style="color:' + (overdue ? '#ff9b9b' : '#fff') + '">' + overdue + '</div><div class="k">超时</div></div>'
-    + '<div class="hero-kpi"><div class="v" style="color:' + (inc.length ? '#ff9b9b' : '#fff') + '">' + inc.length + '</div><div class="k">异常</div></div>'
-    + '</div></div>';
-
-  html += inspectionMineCard(me);
-  html += inspectionPoolCard(me);
-
-  if (pending.length || inc.length || attentionNotices.length) {
-    html += '<div class="card"><div class="card-head"><div class="card-title">需要我处理</div></div>';
-    if (inc.length) html += inc.slice(0, 2).map(function (x) { return Comp.incidentRow(x); }).join('');
-    html += attentionNotices.slice(0, 3).map(function (n) {
-      return '<div class="li" data-act="open-notice" data-id="' + n.id + '"><div class="grow"><div class="t-md t-w6">' + U.esc(n.title) + '</div>'
-        + '<div class="t-xs c2 mt8 ell">' + U.esc(n.content) + '</div></div><div class="li-arrow">›</div></div>';
-    }).join('');
-    if (pending.length) html += '<div class="btn btn-ghost btn-block mt12" data-act="open-approval">待审批 ' + pending.length + ' 项</div>';
-    html += '</div>';
-  } else {
-    html += '<div class="card"><div class="row-b"><div><div class="t-md t-w6">当前无需介入</div>'
-      + '<div class="t-xs c3 mt8">普通做房由员工从共享房池自主领取；主管只处理异常、超时和特殊事项。</div></div>'
-      + '<div style="font-size:24px">✓</div></div></div>';
-  }
-
-  html += '<div class="card"><div class="card-head"><div class="card-title">快捷处理</div></div><div class="enter-grid">'
-    + (isHK ? enterBox('go-hk-work', '客房作业', '🧹', '#fdf1e5', 0) : '')
-    + (isHK ? enterBox('go-hk-inspect', '查房', '🔍', '#eaf1fd', inspectionPoolTasks(me).length + inspectionMineTasks(me).length) : '')
-    + (Policy.businessEnabled('staff_meal', me.hotelId) ? enterBox('go-meal', '员工餐申报', '🍚', '#faf4e9', 0) : '')
-    + enterBox('open-incident', '异常', '⚠️', '#fdecec', inc.length)
-    + enterBox('tab', '任务', '📋', '#eaf1fd', 0)
-    + enterBox('go-stats', '数据', '📊', '#f1f3f6', 0)
-    + '</div></div>';
-  return html;
-}
-
-
-function homeManagerLegacy(me) {
-  var deptId = me.deptId;
-  var today = U.ymd();
-  var allToday = Engine.Task.todayAll().filter(function (t) { return t.deptId === deptId; });
-  var done = allToday.filter(function (t) { return t.status === 'done' || t.status === 'closed'; }).length;
-  var open = allToday.length - done;
-  var overdue = allToday.filter(Engine.Task.isOverdue).length;
-  var myOpen = Engine.Task.mine(me.id);
-  var pending = Engine.Purchase.pendingFor(me.id);
-  var inc = Engine.Incident.byDept(deptId);
-  var head = Engine.deptHead(deptId) === me.id;
-
-  var html = '<div class="hero">'
-    + '<div class="hero-title">' + U.esc(DB.deptName(deptId)) + ' · 今日执行</div>'
-    + '<div class="hero-sub">' + U.md() + ' ' + U.weekdayCN() + '，你好 ' + U.esc(me.name) + '</div>'
-    + '<div class="hero-kpis">'
-    + '<div class="hero-kpi"><div class="v">' + allToday.length + '</div><div class="k">今日任务</div></div>'
-    + '<div class="hero-kpi"><div class="v">' + done + '</div><div class="k">已完成</div></div>'
-    + '<div class="hero-kpi"><div class="v">' + open + '</div><div class="k">待完成</div></div>'
-    + '<div class="hero-kpi"><div class="v" style="color:' + (overdue ? '#ff9b9b' : '#fff') + '">' + overdue + '</div><div class="k">已超时</div></div>'
-    + '</div><div class="hero-line"></div>'
-    + '<div class="row-b mt12" style="position:relative;z-index:2">'
-    + '<div class="t-xs" style="color:rgba(255,255,255,.7)">本部门完成率 ' + U.pct(done, allToday.length) + '%</div>'
-    + '<div class="t-xs" style="color:rgba(255,255,255,.7)">异常 ' + inc.length + ' 项</div></div>'
-    + '</div>';
-
-  html += inspectionMineCard(me);
-  html += inspectionPoolCard(me);
-
-  html += '<div class="card"><div class="kpi-grid c3">'
-    + kpiBox(pending.length, '待我审批', 'c-orange', 'open-approval')
-    + kpiBox(inc.length, '本部门异常', 'c-red', 'open-incident')
-    + kpiBox(myOpen.length, '我的待办', '', 'tab')
-    + '</div></div>';
-
-  html += Comp.sectionTitle('需要关注');
-  var unreadAll = DB.find('notifications', function (n) { return n.userId === me.id && !n.read; })
-    .sort(function (a, b) { return b.createdAt - a.createdAt; }).slice(0, 4);
-  if (!unreadAll.length && !inc.length) html += '<div class="list">' + Comp.empty('暂无异常，部门运转正常', '✅') + '</div>';
-  else {
-    html += '<div class="list">';
-    html += inc.slice(0, 2).map(function (x) { return Comp.incidentRow(x); }).join('');
-    html += unreadAll.slice(0, 3).map(function (n) {
-      return '<div class="li" data-act="open-notice" data-id="' + n.id + '">'
-        + '<div class="li-icon" style="background:#eaf1fd">' + (n.type === 'escalate' ? '⏰' : n.type === 'approve' ? '🧾' : '🔔') + '</div>'
-        + '<div class="grow"><div class="t-md t-w6">' + U.esc(n.title) + '</div>'
-        + '<div class="t-xs c2 mt8 ell">' + U.esc(n.content) + '</div>'
-        + '<div class="t-xs c3 mt8">' + U.relTime(n.createdAt) + '</div></div><div class="li-arrow">›</div></div>';
-    }).join('');
-    html += '</div>';
-  }
-
-  /* 主管首页先保留“下属会做的事”：入口直接复用员工能力生成器，避免有权限却找不到按钮。 */
-  var lineOps = staffEntries(me);
-  html += '<div class="card"><div class="card-head"><div class="card-title">一线工作</div></div>'
-    + '<div class="enter-grid">' + lineOps.map(function (o) {
-      return '<div class="enter" data-act="' + o.k + '"><div class="ei" style="background:' + o.bg + '">' + o.i + '</div><div class="en">' + o.n + '</div></div>';
-    }).join('') + '</div></div>';
-
-  var kinds = Engine.Purchase.kindsFor(me.id);
-  html += '<div class="card"><div class="card-head"><div class="card-title">管理</div></div>'
-    + '<div class="enter-grid">'
-    + (kinds.indexOf('food') >= 0 ? enterBox('go-food-apply', '食材申购', '🥬', '#e7f6ef', 0) : '')
-    + (kinds.indexOf('eng') >= 0 ? enterBox('go-apply', '维修物资', '🔧', '#f1f3f6', 0) : '')
-    + (deptId === 'd_fo' ? enterBox('go-complaint', '客诉受理', '🙋', '#fdecec', 0) : '')
-    + (deptId === 'd_fo' ? enterBox('go-coordinate', '跨部门协作', '📨', '#eaf1fd', 0) : '')
-    + (deptId === 'd_fo' ? enterBox('go-sop', '定时任务', '⏰', '#f0ecfd', 0) : '')
-    + enterBox('open-incident', '异常中心', '⚠️', '#fdecec', inc.length)
-    + enterBox('tab', '任务中心', '📋', '#eaf1fd', 0)
-    + (kinds.length ? enterBox('go-purchase', '采购台账', '🛒', '#f0ecfd', pending.length) : '')
-    + enterBox('go-stats', '数据', '📊', '#f1f3f6', 0)
-    + (Policy.can(me, 'manage_recurring_task') ? enterBox('go-recurring', '周期任务', '🔁', '#eaf1fd', Recurring ? Recurring.todoForDept(deptId, U.ymd()).length : 0) : '')
-    + (Policy.can(me, 'view_cost') ? enterBox('go-cost', '运营成本', '💰', '#faf4e9', 0) : '')
-    + '</div></div>';
-
-  /* 本部门执行概览（近 7 天） */
-  var r7 = Engine.Stats.range('7');
-  var rows = Engine.Stats.byDept(r7).filter(function (x) { return x.deptId === deptId; });
-  if (rows.length) {
-    html += Comp.sectionTitle('本部门近 7 天');
-    html += '<div class="card"><div class="kpi-grid c3">'
-      + kpiBox2(rows[0].total, '任务数')
-      + kpiBox2(rows[0].rate + '%', '完成率')
-      + kpiBox2(rows[0].overdue, '超时', rows[0].overdue ? 'c-red' : '')
-      + '</div>'
-      + '<div class="mt12">' + Comp.bar(rows[0].rate, rows[0].rate >= 90 ? 'green' : 'orange') + '</div></div>';
-  }
-  return html;
+  /* 主管始终使用同一“我的工作”行动池，继承一线操作权但不复制整套目录。
+   * 本部门少量异常只作管理关注，不生成第二份行动任务卡。 */
+  var html = homeStaff(me);
+  var incidents = Engine.Incident.byDept(me.deptId);
+  if (!incidents.length) return html;
+  var attention = '<div class="card"><div class="row-b" data-act="open-incident">'
+    + '<div class="grow"><div class="t-md t-w6">本部门异常 <span class="chip chip-red">' + incidents.length + '</span></div>'
+    + '<div class="t-xs c3 mt8">只关注需要介入的异常，普通工作在“我的工作”处理</div></div>'
+    + '<div class="li-arrow">›</div></div></div>';
+  /* 保留员工的第一入口为“我的工作”，管理关注放在其后。 */
+  var anchor = '<div class="card"><div class="card-head"><div class="card-title">常用';
+  return html.replace(anchor, attention + anchor);
 }
 
 
@@ -17931,6 +17867,25 @@ var RANGE_KEY = '30';
 App.page('stats', {
   title: '数据统计',
   render: function (r) {
+    var me = Engine.Session.user();
+    var guard = ServiceGuard.check({ action: 'statistics.read', scope: 'statistics', capability: 'view_stats' });
+    if (!guard.ok) return Comp.empty(guard.reason || '没有查看统计数据的权限', '🔒');
+    /* 部门负责人默认只看本部门运行，不因角色继承打开全店统计和采购金额。 */
+    if (Policy.isSupervisor(me) && !Policy.can(me, 'view_cost')
+      && (me.roles || []).indexOf('gm') < 0) {
+      var deptTasks = Engine.Task.todayAll().filter(function (t) { return t.deptId === me.deptId; });
+      var closed = deptTasks.filter(function (t) { return t.status === 'done' || t.status === 'closed'; }).length;
+      var abnormal = Engine.Incident.byDept(me.deptId).length;
+      var overdue = deptTasks.filter(Engine.Task.isOverdue).length;
+      return '<div class="pad mt16"><div class="card"><div class="card-head"><div class="card-title">'
+        + U.esc(DB.deptName(me.deptId)) + ' · 部门工作概况</div></div>'
+        + '<div class="kpi-grid c3">'
+        + '<div class="kpi"><div class="v">' + deptTasks.length + '</div><div class="k">今日工作</div></div>'
+        + '<div class="kpi"><div class="v">' + closed + '</div><div class="k">已完成</div></div>'
+        + '<div class="kpi"><div class="v">' + overdue + '</div><div class="k">超时</div></div>'
+        + '<div class="kpi"><div class="v">' + abnormal + '</div><div class="k">异常</div></div>'
+        + '</div></div></div>';
+    }
     var rk = r.params.range || RANGE_KEY;
     RANGE_KEY = rk;
     var range = Engine.Stats.range(rk);
@@ -21662,21 +21617,27 @@ App.page('recurring', {
     var me = Engine.Session.user();
     var canCreate = Policy.can(me, 'manage_recurring_task');
     var tab = r.params.tab || 'today';
-    var rules = Recurring.list({ activeOnly: false });
-    var active = rules.filter(function (x) { return x.active !== 0; });
-    var todayIns = Recurring.todoForDept('', U.ymd());
-    var mine = todayIns.filter(function (x) { return x.actualAssigneeId === me.id || x.assigneeId === me.id; });
-    var canDo = todayIns.filter(function (x) {
-      return x.assigneeId === me.id || (!x.assigneeId && Policy.can(me, 'manage_org'));
+    if (tab === 'rule' && !canCreate) return Comp.empty('周期任务由店长配置；请从我的工作处理本期任务', '🔒');
+    var isGM = (me.roles || []).indexOf('gm') >= 0;
+    var rules = canCreate ? Recurring.list({ activeOnly: false }).filter(function (rt) {
+      return isGM || rt.deptId === me.deptId;
+    }) : [];
+    /* 显式委托的主管只能查看本部门模板与本期实例，不因此获得全店列表。 */
+    var all = Recurring.todoForDept('', U.ymd());
+    var todayIns = all.filter(function (x) {
+      if (isGM) return true;
+      if (canCreate && x.deptId === me.deptId) return true;
+      return (x.status !== 'waitcheck' && Recurring.canExecute(x, me))
+        || (x.status === 'waitcheck' && Recurring.canVerify(x, me));
     });
+    var mine = todayIns.filter(function (x) { return x.actualAssigneeId === me.id || x.assigneeId === me.id; });
 
     var html = '<div class="pad mt12">' + Comp.seg([
-      { k: 'today', n: '今日待执行 ' + todayIns.length },
-      { k: 'rule', n: '周期规则 ' + rules.length }
-    ], tab, 'rt-tab') + '</div>';
+      { k: 'today', n: '今日待执行 ' + todayIns.length }
+    ].concat(canCreate ? [{ k: 'rule', n: '周期规则 ' + rules.length }] : []), tab, 'rt-tab') + '</div>';
 
     if (tab === 'today') {
-      html += '<div class="card mt12"><div class="card-head"><div class="card-title">今日到期（' + U.ymd() + '）</div></div>'
+      html += '<div class="card mt12"><div class="card-head"><div class="card-title">待执行与往期未完成（' + U.ymd() + '）</div></div>'
         + '<div class="kpi-grid c3">'
         + '<div class="kpi"><div class="v">' + todayIns.length + '</div><div class="k">本期待执行</div></div>'
         + '<div class="kpi"><div class="v c-blue">' + mine.length + '</div><div class="k">指派给我</div></div>'
@@ -21684,10 +21645,10 @@ App.page('recurring', {
         + '</div>'
         + '<div class="t-xs c3 mt12">到期只生成「待执行」，谁真正开始系统才记录谁 —— 不预先替现场派人。</div></div>';
 
-      html += Comp.sectionTitle('今日清单');
+      html += Comp.sectionTitle('待办清单');
       if (!todayIns.length) html += Comp.empty('今天没有到期的周期任务', '🔁');
       else html += '<div class="list">' + todayIns.map(function (ins) {
-        return instRow(ins, canDo);
+        return instRow(ins);
       }).join('') + '</div>';
     } else {
       html += '<div class="card mt12"><div class="card-head"><div class="card-title">周期任务规则</div>'
@@ -21713,7 +21674,7 @@ App.page('recurring', {
   }
 });
 
-function instRow(ins, canDo) {
+function instRow(ins) {
   var ST = { pending: ['待执行', 'chip-line'], doing: ['处理中', 'chip-blue'], waitcheck: ['待验收', 'chip-orange'], done: ['已完成', 'chip-green'] };
   var s = ST[ins.status] || ST.pending;
   var mine = isMine(ins);
@@ -21724,10 +21685,10 @@ function instRow(ins, canDo) {
     + '<div class="t-xs c3 mt8">' + U.esc(DB.deptName(ins.deptId)) + ' · 截止 ' + U.esc(ins.dueTime || '')
     + ' · ' + (ins.actualAssigneeId ? '执行人 ' + U.esc(DB.userName(ins.actualAssigneeId)) : '尚未开始') + '</div>'
     + (ins.exceptionNote ? '<div class="t-xs c-red mt8">' + U.esc(ins.exceptionNote) + '</div>' : '')
-    + (ins.status === 'pending' ? '<div class="btn btn-primary btn-xs mt8" data-act="rt-start" data-id="' + ins.id + '" style="display:inline-flex">开始执行</div>' : '')
-    + (ins.status === 'doing' ? '<div class="row mt8" style="gap:8px">'
+    + (ins.status === 'pending' && Recurring.canExecute(ins) ? '<div class="btn btn-primary btn-xs mt8" data-act="rt-start" data-id="' + ins.id + '" style="display:inline-flex">开始执行</div>' : '')
+    + (ins.status === 'doing' && Recurring.canExecute(ins) && ins.actualAssigneeId === Engine.Session.user().id ? '<div class="row mt8" style="gap:8px">'
       + '<div class="btn btn-green btn-xs" data-act="rt-finish" data-id="' + ins.id + '">完成</div></div>' : '')
-    + (ins.status === 'waitcheck' && (Engine.deptHead(ins.deptId) === Engine.Session.user().id || Policy.can(Engine.Session.user(), 'manage_recurring_task'))
+    + (ins.status === 'waitcheck' && Recurring.canVerify(ins)
       ? '<div class="row mt8" style="gap:8px">'
         + '<div class="btn btn-green btn-xs" data-act="rt-verify" data-id="' + ins.id + '" data-pass="1">验收通过</div>'
         + '<div class="btn btn-danger btn-xs" data-act="rt-verify" data-id="' + ins.id + '" data-pass="0">退回返工</div></div>' : '')
@@ -21759,6 +21720,7 @@ App.act('rt-verify', function (el) {
 
 /* ---------------- 新建 / 查看规则 ---------------- */
 App.act('rt-create', function () {
+  if (!Policy.can(Engine.Session.user(), 'manage_recurring_task')) return U.toast('只有店长或授权人员可以配置周期任务');
   var depts = DB.all('departments').filter(function (d) { return d.id !== 'd_sup' && d.id !== 'd_dev'; });
   App.sheet({
     title: '新建周期任务',
@@ -21801,6 +21763,7 @@ App.act('rt-create-save', function () {
 });
 
 App.act('rt-open', function (el) {
+  if (!Policy.can(Engine.Session.user(), 'manage_recurring_task')) return U.toast('无权查看周期规则');
   var rt = Recurring.byId(el.getAttribute('data-id'));
   if (!rt) return;
   var hist = Recurring.historyOf(rt.id).slice(0, 30);
@@ -22554,6 +22517,8 @@ App.page('cost', {
   title: '运营成本',
   render: function (r) {
     var me = Engine.Session.user();
+    var auth = ServiceGuard.check({ action: 'cost.read', scope: 'cost', capability: 'view_cost' });
+    if (!auth.ok) return Comp.empty(auth.reason || '没有查看运营成本的权限', '🔒');
     var key = r.params.range || 'today';
     var custom = null;
     if (key === 'custom') {
