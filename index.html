@@ -523,7 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 09:38 · DEV-003 三大核心部门首页与权限收口版</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-08 10:21 · DEV-004 前厅客房临时任务极简派单版</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -11884,6 +11884,8 @@ window.GuestReq = (function () {
     { key: 'amenity', name: '洗护/一次性用品', icon: '🪥', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '牙刷、拖鞋、洗护等用品补充' },
     { key: 'linen', name: '毛巾/被子/枕头', icon: '🛏️', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '布草类需求' },
     { key: 'clean', name: '重新打扫/整理', icon: '🧹', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '房间重新清洁或整理' },
+    { key: 'hanger', name: '送衣架', icon: '👔', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '衣架补给' },
+    { key: 'tidy', name: '临时整理', icon: '🧺', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '不改变客房脏净状态的轻量整理；正式清扫另走客房作业' },
     { key: 'hk_other', name: '其它房间服务', icon: '📦', group: 'room_service', dept: 'd_hk', alsoVisible: ['d_fo'], hint: '送物、加物品等临时客房任务' },
     { key: 'repair', name: '设备设施问题', icon: '🛠️', group: 'facility', dept: 'd_eng', alsoVisible: ['d_fo'], repair: true, hint: '空调、电视、水温、门锁等设施设备故障' },
     { key: 'other', name: '其它需求', icon: '🙋', group: 'frontdesk', dept: 'd_fo', alsoVisible: [], hint: '前厅先承接再转办' }
@@ -12057,6 +12059,41 @@ window.GuestReq = (function () {
     return create(o);
   }
 
+  /** 极简客房临时派单：一次电话可有多项服务，但只生成一个客需对象与一个执行任务。 */
+  function createQuickHousekeeping(o) {
+    o = o || {};
+    var me = Engine.Session.me;
+    if (!me || !(Policy.can(me, 'frontdesk') || Policy.can(me, 'dispatch_housekeeping')))
+      return { ok: false, reason: '没有客房临时任务派单权限' };
+    var room = DB.byId('rooms', o.roomId);
+    if (!room || !AuthContext.checkScope(room).ok)
+      return { ok: false, reason: '请选择本门店有效房间' };
+    var raw = Array.isArray(o.items) ? o.items : [];
+    if (!raw.length || raw.length > 8) return { ok: false, reason: '请选择1至8项客房服务' };
+    var items = [];
+    for (var i = 0; i < raw.length; i++) {
+      var x = raw[i] || {};
+      var tp = TYPES.filter(function (t) { return t.key === x.type && t.group === 'room_service' && t.key !== 'clean'; })[0];
+      if (!tp) return { ok: false, reason: '临时送物不能混入标准做房，请通过客房作业发起清扫' };
+      if (items.some(function (it) { return it.type === tp.key; }))
+        return { ok: false, reason: '同一事项不要重复选择' };
+      var n = Number(x.count || 1);
+      if (!isFinite(n) || n < 1 || n > 99 || Math.floor(n) !== n)
+        return { ok: false, reason: '数量须为1至99的整数' };
+      items.push({ type: tp.key, name: tp.name, count: n });
+    }
+    var note = String(o.note || '').trim().slice(0, 300);
+    var detail = items.map(function (it) { return it.name + (it.count > 1 ? ' ×' + it.count : ''); }).join('、');
+    if (note) detail += '；' + note;
+    var r = create({
+      roomId: room.id, type: items.length === 1 ? items[0].type : 'hk_other',
+      content: detail, source: '前厅代客发起', count: items.length === 1 ? items[0].count : 1
+    });
+    if (!r.ok) return r;
+    DB.update('guestRequests', r.request.id, { serviceItems: items, guestNote: note });
+    return { ok: true, request: DB.byId('guestRequests', r.request.id) };
+  }
+
   /** 提醒范围：责任部门 + 前厅 + 店长异常视角（不做全员轰炸） */
   function notifyRelated(req, tp, title, content) {
     var ids = {};
@@ -12221,7 +12258,7 @@ window.GuestReq = (function () {
 
   return {
     TYPES: TYPES, ST: ST, typeOf: typeOf,
-    create: create, createInternal: createInternal, all: all, byId: byId, feed: feed, todoFor: todoFor, isOverdue: isOverdue,
+    create: create, createInternal: createInternal, createQuickHousekeeping: createQuickHousekeeping, all: all, byId: byId, feed: feed, todoFor: todoFor, isOverdue: isOverdue,
     take: take, transfer: transfer, done: done, escalate: escalate, stats: stats
   };
 })();
@@ -13970,7 +14007,7 @@ function staffEntries(u) {
     add('go-room-swap', '换房处理', '🔄', '#eaf1fd');
     if (Policy.businessEnabled('sales', u.hotelId)) add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
     if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-breakfast-forecast', '住客早餐', '🥐', '#e7f6ef');
-    add('go-guest', '住客服务', '🙋', '#eaf1fd');
+    add('go-guest-hk', '客房临时任务', '🧺', '#f0ecfd');
     add('go-complaint', '客诉受理', '🙋', '#fdecec');
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
@@ -13992,7 +14029,7 @@ function staffEntryGroups(u) {
   var ops = staffEntries(u);
   /* 工作台根据实际职责排列；能力权限负责可达，不等于全部常驻首页。 */
   var core = Policy.can(u, 'frontdesk')
-    ? ['go-guest', 'go-handover', 'go-breakfast-forecast', 'tm-new', 'go-meal']
+    ? ['go-guest-hk', 'go-handover', 'go-breakfast-forecast', 'tm-new', 'go-meal']
     : Policy.can(u, 'sales') && !Policy.can(u, 'frontdesk')
       ? ['sl-new', 'mt-reserve-new', 'tm-new', 'go-meal']
       : Policy.can(u, 'maintain')
@@ -14285,6 +14322,7 @@ App.act('go-search', function () { App.go('search'); });
 App.act('go-mywo', function () { App.go('mywo'); });
 /* V4.3.1 首页新增入口 */
 App.act('go-guest', function () { App.go('guest?tab=todo'); });
+App.act('go-guest-hk', function () { App.go('guest-hk-new'); });
 App.act('go-guest-internal', function () { App.go('guest?tab=new'); });
 App.act('go-maint', function () { App.go('maint?tab=todo'); });
 App.act('go-recurring', function () { App.go('recurring?tab=today'); });
@@ -22072,6 +22110,73 @@ App.act('mt-plan-toggle', function (el) {
  *   首页红点与推送只给责任部门、前厅和店长异常视角；全店动态列表对所有员工开放。
  * 第一阶段没有室内定位，不声称按真实距离派单。
  * ======================================================================= */
+
+/* DEV-004：前厅极简客房临时任务，不提供独立记录子菜单；历史沿用统一工作台。 */
+App.page('guest-hk-new', {
+  title: '客房临时任务',
+  render: function () {
+    var me = Engine.Session.user();
+    if (!me || !(Policy.can(me, 'frontdesk') || Policy.can(me, 'dispatch_housekeeping')))
+      return Comp.empty('没有客房临时任务派单权限', '🔒');
+    var rooms = DB.all('rooms').filter(function (room) {
+      return AuthContext.checkScope(room).ok && room.status !== 'disabled' && room.isActive !== false;
+    }).sort(function (a, b) { return String(a.number).localeCompare(String(b.number), 'zh-CN', { numeric: true }); });
+    var choices = [
+      { k: 'water', n: '矿泉水', i: '💧' },
+      { k: 'amenity', n: '一次性用品', i: '🪥' },
+      { k: 'hanger', n: '衣架', i: '👔' },
+      { k: 'linen', n: '毛巾/床品', i: '🛏️' },
+      { k: 'tidy', n: '临时整理', i: '🧺' },
+      { k: 'hk_other', n: '其它客房事项', i: '📦' }
+    ];
+    var html = '<div class="card mt12"><div class="card-title">房号</div>'
+      + '<input id="gq-quick-room" class="inp mt12" type="text" inputmode="numeric" list="gq-quick-rooms" autocomplete="off" placeholder="输入房号，例如803">'
+      + '<datalist id="gq-quick-rooms">' + rooms.map(function (rm) { return '<option value="' + U.esc(rm.number) + '"></option>'; }).join('') + '</datalist>'
+      + '<div class="t-xs c3 mt8">输入房号即可匹配本店房间</div></div>';
+    html += '<div class="card mt12"><div class="card-title">客人需要什么？（可多选）</div>'
+      + '<div class="opt-grid c2 mt12">' + choices.map(function (c) {
+        return '<div class="opt" data-act="gq-quick-choice" data-type="' + c.k + '"><span class="oe">' + c.i + '</span>' + U.esc(c.n) + '</div>';
+      }).join('') + '</div></div>';
+    html += '<div class="card mt12"><div class="card-title">数量及说明（选填）</div>'
+      + '<input class="inp mt12" id="gq-quick-count" type="number" min="1" max="99" placeholder="单项数量（不填默认1）">'
+      + '<textarea class="inp mt12" id="gq-quick-note" placeholder="如：送4瓶水、2个衣架；特别要求可使用手机键盘语音输入" style="text-align:left;border:1px solid var(--line-2);border-radius:10px;padding:12px;height:68px"></textarea>'
+      + '<div class="t-xs c3 mt8">多项不同数量写在说明中；系统一次派给客房，无需选择执行人。</div></div>'
+      + '<div class="pad mt12"><button class="btn btn-primary btn-block" data-act="gq-quick-save">派给客房</button></div>';
+    return html;
+  }
+});
+App.act('gq-quick-choice', function (el) {
+  el.classList.toggle('sel');
+  el.setAttribute('aria-pressed', el.classList.contains('sel') ? 'true' : 'false');
+  el.style.borderColor = el.classList.contains('sel') ? 'var(--primary)' : '';
+  el.style.background = el.classList.contains('sel') ? 'var(--primary-light, #eaf1fd)' : '';
+});
+App.act('gq-quick-save', function () {
+  var me = Engine.Session.user();
+  if (!me || !(Policy.can(me, 'frontdesk') || Policy.can(me, 'dispatch_housekeeping'))) {
+    U.toast('没有派单权限'); return;
+  }
+  var roomNo = ((document.getElementById('gq-quick-room') || {}).value || '').trim();
+  var rooms = DB.all('rooms').filter(function (rm) {
+    return String(rm.number).trim() === roomNo && AuthContext.checkScope(rm).ok;
+  });
+  if (rooms.length !== 1) { U.toast('请选择本店有效房号'); return; }
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('[data-act="gq-quick-choice"][aria-pressed="true"]'));
+  if (!buttons.length) { U.toast('请至少选择一项服务'); return; }
+  var qtyText = ((document.getElementById('gq-quick-count') || {}).value || '').trim();
+  if (buttons.length > 1 && qtyText) { U.toast('多项不同数量请写在补充说明中'); return; }
+  var qty = qtyText ? Number(qtyText) : 1;
+  if (!isFinite(qty) || Math.floor(qty) !== qty || qty < 1 || qty > 99) { U.toast('数量须为1至99的整数'); return; }
+  var items = buttons.map(function (b) { return { type: b.getAttribute('data-type'), count: buttons.length === 1 ? qty : 1 }; });
+  var res = GuestReq.createQuickHousekeeping({
+    roomId: rooms[0].id, items: items,
+    note: ((document.getElementById('gq-quick-note') || {}).value || '').trim()
+  });
+  if (!res.ok) { U.toast(res.reason || '派单失败'); return; }
+  DB.flush();
+  U.toast('已派给客房，可在统一工作台查询进度');
+  App.go('guest-hk-new');
+});
 
 App.page('guest', {
   title: '住客服务',
