@@ -522,8 +522,9 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 <style>
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
+<meta name="hotelops-source-sha" content="09dcc218f151df233102abf33811970e8b19542b">
 </head>
-<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-09 19:04 · DEV-006 组织赋权与任务路由专项版 [338816d51790]</div>
+<body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="pointer-events:none;position:fixed;z-index:10001;right:12px;bottom:12px;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-10 · OPS-01～06 前厅新版顺序人工验收 [3c2fd54b5dd6]</div>
 
 <div class="stage">
   <!-- 左侧说明区（桌面端可见，移动端自动隐藏） -->
@@ -876,7 +877,7 @@ window.DB = (function () {
      *   dailyRoomSales        每日售出房晚（手工录入 / PMS 来源，作为成本分母）
      */
     'recurringTasks', 'taskInstances', 'maintenancePlans', 'maintenanceRecords',
-    'guestRequests', 'issueRecords', 'dailyRoomSales'
+    'guestRequests', 'issueRecords', 'dailyRoomSales', 'lostItems'
   ];
 
   /* ---------------- 持久化 ---------------- */
@@ -3626,32 +3627,61 @@ window.RoomSvc = (function () {
     return { ok: true };
   }
 
-  /** 清扫中发现客人物品遗留：登记留痕并通知客房主管/前厅，不中断原清扫。 */
-  function reportLostItem(cleanId, note) {
-    var clean = DB.byId('roomClean', cleanId);
-    if (!clean || clean.endedAt) return { ok: false, reason: '没有进行中的清扫' };
-    var eg = ExecutionGuard.actor(clean, 'cleanerId', { action: 'room.write', scope: 'room', capability: 'clean' });
-    if (!eg.ok) return eg;
-    var r = DB.byId('rooms', clean.roomId);
+  /** 同一遗留物记录适用于清扫、现场核实；只登记发现事实，不强制额外处置动作。
+   * 行李尚在房内不等于已确定遗留；只能在员工明确确认发现后登记。 */
+  function recordLostItem(o) {
+    o = o || {};
+    var me = Engine.Session.me, room = DB.byId('rooms', o.roomId);
+    if (!me || !(Policy.can(me, 'clean') || Policy.can(me, 'inspect') || Policy.can(me, 'frontdesk')))
+      return { ok: false, reason: '没有登记遗留物的工作权限' };
+    if (!room || !AuthContext.inScope(room)) return { ok: false, reason: '无法登记其它门店的房间物品' };
+    var note = String(o.note || '').trim();
+    if (!note) return { ok: false, reason: '请简要记录实物信息' };
+    var sourceType = String(o.sourceType || 'roomClean'), sourceId = String(o.sourceId || '');
+    var existing = DB.findOne('lostItems', function (x) {
+      return AuthContext.inScope(x) && x.roomId === room.id &&
+        x.sourceType === sourceType && x.sourceId === sourceId && x.note === note;
+    });
+    if (existing) return { ok: true, repeat: true, item: existing };
     var item = DB.insert('lostItems', AuthContext.stamp({
-      id: U.uid('lost'), roomId: clean.roomId, cleanId: cleanId,
-      reporterId: Engine.Session.me.id, reporter: Engine.Session.me.name,
-      note: note || '发现客人物品遗留', status: 'reported', createdAt: Date.now()
+      id: U.uid('lost'), roomId: room.id, cleanId: sourceType === 'roomClean' ? sourceId : '',
+      sourceType: sourceType, sourceId: sourceId,
+      reporterId: me.id, reporter: me.name, note: note,
+      status: 'reported', createdAt: Date.now()
     }));
-    tl(clean.roomId, 'lost', clean.cleaner + ' 上报客人物品遗留：' + (note || '未描述'), { refType: 'lostItem', refId: item.id });
-    var targets = {};
+    tl(room.id, 'lost', me.name + ' 记录发现物品：' + note,
+      { refType: 'lostItem', refId: item.id });
+    var recipients = {};
     var hkHead = Engine.deptHead && Engine.deptHead('d_hk');
-    if (hkHead) targets[hkHead] = 1;
-    Policy.whoHas('frontdesk').forEach(function (u) { targets[u.id] = 1; });
-    Object.keys(targets).forEach(function (uid) {
+    if (hkHead) recipients[hkHead] = 1;
+    Policy.whoHas('frontdesk').filter(function (u) {
+      return typeof Presence === 'undefined' || Presence.isWorking(u.id);
+    }).forEach(function (u) { recipients[u.id] = 1; });
+    Object.keys(recipients).forEach(function (uid) {
       Engine.notify(uid, {
-        type: 'task', title: (r ? r.number : '') + ' 房发现客人物品遗留',
-        content: (note || '请按门店遗留物流程处理') + ' · 上报人 ' + clean.cleaner,
+        type: 'info', title: room.number + ' 房发现物品',
+        content: note + ' · 前厅按现行酒店制度判断如何处理，无需客房额外完成工单',
         refType: 'lostItem', refId: item.id
       });
     });
-    if (clean.taskId) Engine.Task.addStep(clean.taskId, '清扫中发现客人物品遗留，已登记并通知相关人员');
+    if (sourceType === 'roomClean') {
+      var clean = DB.byId('roomClean', sourceId);
+      if (clean && clean.taskId) Engine.Task.addStep(clean.taskId,
+        '清扫中发现物品，已留痕并通知前厅；原清扫继续');
+    }
     return { ok: true, item: item };
+  }
+
+  /** 清扫专用入口只负责验证在执行的原清扫，复用统一登记记录。 */
+  function reportLostItem(cleanId, note) {
+    var clean = DB.byId('roomClean', cleanId);
+    if (!clean || clean.endedAt) return { ok: false, reason: '没有进行中的清扫' };
+    var eg = ExecutionGuard.actor(clean, 'cleanerId', {
+      action: 'room.write', scope: 'room', capability: 'clean'
+    });
+    if (!eg.ok) return eg;
+    return recordLostItem({ roomId: clean.roomId, sourceType: 'roomClean',
+      sourceId: cleanId, note: note || '发现客人物品遗留' });
   }
 
   /** 清扫中直接发起工程报修后：保持当前清扫未完成，暂停并关联工程任务。 */
@@ -4734,7 +4764,7 @@ window.RoomSvc = (function () {
     hkName: hkName, inspName: inspName, prioName: prioName,
     byToken: byToken, byNumber: byNumber, state: state, timeline: timeline, tl: tl,
     scanActions: scanActions,
-    cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanWaitRepair: cleanWaitRepair, repairResolved: repairResolved, cleanFinish: cleanFinish, reportLostItem: reportLostItem, transferClean: transferClean,
+    cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanWaitRepair: cleanWaitRepair, repairResolved: repairResolved, cleanFinish: cleanFinish, reportLostItem: reportLostItem, recordLostItem: recordLostItem, transferClean: transferClean,
     openClean: openClean, cleanToday: cleanToday, lastClean: lastClean,
     inspStart: inspStart, inspFinish: inspFinish, transferInspection: transferInspection, recheckStart: recheckStart, rectifyDone: rectifyDone,
     setPriority: setPriority, releasePriority: releasePriority,
@@ -12790,6 +12820,336 @@ window.GuestReq = (function () {
 })();
 </script>
 <script>
+/* HotelOps OPS-01~06: one existing work item, truthful room reminders and daily facts.
+ * Site checks are NOT quality inspections; loans and lost items do NOT affect saleability.
+ * Browser-local demo does not claim multi-device durability. */
+window.OpsFlow = (function () {
+  var PURPOSES = {
+    hourly_due: '钟点房到点核实/催退', occupancy: '核实房内是否有人',
+    overdue: '超时未退房现场核实', status: '核实房卡/行李/异常', other: '其它现场核实'
+  };
+  var PRESENCE = { occupied: '房内有人', empty: '房内无人', unable: '无法确认' };
+  function fail(reason) { return { ok: false, reason: reason }; }
+  function actor(cap) {
+    var me = Engine.Session.user();
+    if (!me || !Policy.can(me, cap) || (me.roles || []).indexOf('developer') >= 0)
+      return null;
+    return me;
+  }
+  function roomOf(roomId) {
+    var room = DB.byId('rooms', roomId);
+    return room && AuthContext.inScope(room) && room.active !== 0 ? room : null;
+  }
+  function siteOpen(roomId) {
+    return DB.findOne('tasks', function (t) {
+      return AuthContext.inScope(t) && t.roomId === roomId && t.type === 'room_site_check'
+        && ['done', 'closed', 'canceled'].indexOf(t.status) < 0;
+    });
+  }
+  function siteCreate(o) {
+    o = o || {};
+    var me = actor('frontdesk'), room = roomOf(o.roomId);
+    if (!me) return fail('只有本店前厅可发起现场核实查房');
+    if (!room) return fail('请选择本店有效房间');
+    if (!Policy.businessEnabled('housekeeping', room.hotelId)) return fail('本店未启用客房业务');
+    var purpose = PURPOSES[o.purpose] ? o.purpose : 'status';
+    var existing = siteOpen(room.id);
+    if (existing) {
+      var reasons = (existing.siteReasons || [existing.sitePurpose || 'status']).slice();
+      if (reasons.indexOf(purpose) < 0) {
+        reasons.push(purpose);
+        DB.update('tasks', existing.id, { siteReasons: reasons,
+          desc: reasons.map(function (k) { return PURPOSES[k]; }).join('；') });
+        Engine.Task.addStep(existing.id, '前厅追加核实目的：' + PURPOSES[purpose]);
+      }
+      return { ok: true, reused: true, task: DB.byId('tasks', existing.id) };
+    }
+    var key = String(o.clientKey || '').trim();
+    var pub = Pool.publish({
+      type: 'room_site_check', businessCapability: 'housekeeping', deptId: 'd_hk',
+      cap: 'clean', roomId: room.id, location: room.number + ' 房',
+      source: '前厅现场核实', title: room.number + ' 房 · ' + PURPOSES[purpose],
+      desc: String(o.note || PURPOSES[purpose]).slice(0, 300),
+      dueMin: 20, priority: purpose === 'hourly_due' || purpose === 'overdue' ? 'high' : 'normal',
+      creatorId: me.id, clientKey: key
+    });
+    if (!pub || !pub.ok) return pub || fail('现场核实发起失败');
+    DB.update('tasks', pub.task.id, {
+      sitePurpose: purpose, siteReasons: [purpose],
+      siteExpectedAt: Number(o.expectedAt) || 0, siteCheckVersion: 1
+    });
+    RoomSvc.tl(room.id, 'site_check', '前厅发起现场核实：' + PURPOSES[purpose],
+      { refType: 'task', refId: pub.task.id });
+    return { ok: true, task: DB.byId('tasks', pub.task.id), repeated: !!pub.repeated };
+  }
+  function siteFinish(taskId, o) {
+    o = o || {};
+    var me = actor('clean'), t = DB.byId('tasks', taskId);
+    if (!me) return fail('只有具备客房现场作业权限的员工可反馈现场核实');
+    if (!t || t.type !== 'room_site_check' || !AuthContext.inScope(t)) return fail('核实任务不存在');
+    if (t.status === 'done') return { ok: true, repeat: true, task: t };
+    if (t.status !== 'doing' || t.assigneeId !== me.id || t.claimBy !== me.id)
+      return fail('请由本人当班接单后提交现场核实结果');
+    if (typeof Presence !== 'undefined' && !Presence.isWorking(me.id))
+      return fail('当前非当班，不能提交现场核实');
+    if (!PRESENCE[o.presence]) return fail('请选择现场人员情况');
+    var flags = ['yes','no','unknown'];
+    if (flags.indexOf(o.baggage) < 0 || flags.indexOf(o.roomCard) < 0)
+      return fail('请确认行李与房卡情况，可选无法确认');
+    var result = {
+      presence: o.presence, baggage: o.baggage, roomCard: o.roomCard,
+      note: String(o.note || '').trim().slice(0, 500),
+      checkedAt: Date.now(), checkerId: me.id
+    };
+    var details = PRESENCE[result.presence] + '；行李：' +
+      ({yes:'有',no:'无',unknown:'无法确认'}[result.baggage]) + '；房卡：' +
+      ({yes:'有',no:'无',unknown:'无法确认'}[result.roomCard]);
+    if (result.note) details += '；' + result.note;
+    /* All linked abnormal operations must pass first; never mark facts completed if an
+     * explicitly requested record failed. Retries reuse the same source identity. */
+    /* Left luggage is NOT automatically a lost item: the guest may still occupy the room.
+     * Explicitly confirmed lost items reuse the existing lostItems business record. */
+    var lost = null, repair = null;
+    if (String(o.confirmedLost || '').trim()) {
+      lost = RoomSvc.recordLostItem({
+        roomId: t.roomId, sourceType: 'room_site_check', sourceId: taskId,
+        note: String(o.confirmedLost).trim()
+      });
+    }
+    if (String(o.repairNote || '').trim()) {
+      var note = String(o.repairNote).trim().slice(0, 300);
+      var same = DB.findOne('workOrders', function (w) {
+        return AuthContext.inScope(w) && w.roomId === t.roomId
+          && ['done','closed','canceled'].indexOf(w.status) < 0
+          && (String(w.reason || '').indexOf(note) >= 0 || String(w.title || '').indexOf(note) >= 0);
+      });
+      repair = same ? { ok: true, repeated: true, workOrderId: same.id }
+        : GuestReq.create({ roomId: t.roomId, type: 'repair', content: note,
+            source: '前厅核实查房发现', clientKey: 'site-repair-'+taskId });
+      if (repair && repair.request) repair.workOrderId = repair.request.workOrderId;
+      if (!repair || !repair.ok) return repair || fail('现场维修异常未能关联');
+    }
+    if (lost && !lost.ok) return lost;
+    var completed = Engine.Task.finish(t.id, details);
+    if (!completed || !completed.ok) return completed || fail('现场核实任务未能完成');
+    DB.update('tasks', taskId, { siteResult: result });
+    RoomSvc.tl(t.roomId, 'site_check', '现场核实：' + details,
+      { refType: 'task', refId: taskId });
+    return { ok: true, task: DB.byId('tasks', taskId), lost: lost, repair: repair };
+  }
+  function hourlyExtend(o) {
+    o = o || {};
+    var me = actor('frontdesk'), room = roomOf(o.roomId);
+    if (!me) return fail('只有前厅可记录钟点房加钟');
+    if (!room) return fail('请选择本店房间');
+    var until = Number(o.until);
+    if (!Number.isFinite(until) || until <= Date.now() || until > Date.now() + 7 * 86400000)
+      return fail('请输入有效的新预计离房时间（未来七天以内）');
+    if (room.hourlyNoticeUntil === until) return { ok: true, repeat: true, room: room };
+    var at = Date.now();
+    DB.update('rooms', room.id, {
+      hourlyNoticeUntil: until, hourlyNoticeAt: at, hourlyNoticeBy: me.id,
+      hourlyNoticeSource: '前厅人工记录，待与 PMS 核对'
+    });
+    RoomSvc.tl(room.id, 'hourly_extend',
+      '前厅通知钟点房加钟，新的预计离房时间 ' + U.mdhm(until) +
+      (o.note ? '；' + String(o.note).slice(0, 150) : ''),
+      { refType: 'room', refId: room.id });
+    var open = siteOpen(room.id);
+    if (open) {
+      Engine.Task.addStep(open.id, '前厅通知加钟至 ' + U.mdhm(until));
+      if (open.status === 'pending' && !open.assigneeId && !open.claimBy &&
+          (open.siteReasons || [open.sitePurpose]).every(function (x) { return x === 'hourly_due'; })) {
+        DB.update('tasks', open.id, {
+          status: 'closed', completedAt: 0, siteSupersededAt: at,
+          result: '客人已加钟；本次未执行的催退核实不再需要',
+          statusHistory: Engine.Task._hist(open, 'closed', '前厅确认加钟取消未认领催退核实')
+        });
+      } else DB.update('tasks', open.id, { siteExtendedUntil: until });
+    }
+    var notified = {};
+    if (open && open.assigneeId) notified[open.assigneeId] = true;
+    Policy.whoHas('clean').filter(function (u) {
+      return AuthContext.inScope(u) && (typeof Presence === 'undefined' || Presence.isWorking(u.id));
+    }).forEach(function (u) { notified[u.id] = true; });
+    Object.keys(notified).forEach(function (id) {
+      Engine.notify(id, { type:'info', title: room.number + ' 房钟点房已加钟',
+        content:'前厅记录预计离房：' + U.mdhm(until) + '；勿按原时点催退。以 PMS / 前厅最终确认作准',
+        refType:'room', refId:room.id });
+    });
+    return { ok: true, room: DB.byId('rooms', room.id), affectedTaskId: open && open.id || '' };
+  }
+  /** 前厅直接使用现有 Engine.Report -> repair task -> workOrder 链，不建另一套维修单。 */
+  function repairCreate(o) {
+    o = o || {};
+    var me = actor('frontdesk'), room = o.roomId ? roomOf(o.roomId) : null;
+    if (!me) return fail('只有本店前厅可从该入口报修');
+    if (o.roomId && !room) return fail('该房间无效或不属于本店');
+    var area = String(o.area || '').trim().slice(0,80);
+    if (!room && !area) return fail('请选择房间或填写公共区域');
+    var type = (DICT.issueTypes || []).filter(function (t) {
+      return t.key === o.issueType && t.repair;
+    })[0];
+    if (!type) return fail('请选择工程故障分类');
+    var note = String(o.note || '').trim().slice(0,300);
+    if (!note) return fail('请简述要维修的实际问题');
+    var key = String(o.clientKey || '').trim();
+    var old = DB.findOne('workOrders', function (w) {
+      return AuthContext.inScope(w) && ['done','closed','canceled'].indexOf(w.status)<0
+        && (room ? w.roomId===room.id : !w.roomId && w.location===area)
+        && w.issueTypeKey === type.key && String(w.reason||'').trim()===type.name+'：'+note;
+    });
+    if (old) return {ok:true,reused:true,wo:old,
+      task:old.taskId?DB.byId('tasks',old.taskId):null};
+    var result = Engine.Report.submit({
+      roomId:room ? room.id : '', area:area, issueType:type.key,
+      desc:note, clientKey:key
+    });
+    if (!result || result.ok===false || !result.wo) return result || fail('工程报修未成功');
+    if (room) RoomSvc.tl(room.id,'repair','前厅报修：'+type.name+' · '+note,
+      {refType:'workOrder',refId:result.wo.id});
+    return {ok:true,wo:result.wo,task:result.task,repeated:!!result.repeat};
+  }
+  function loanCreate(o) {
+    o = o || {};
+    var me = actor('frontdesk'), room = o.roomId ? roomOf(o.roomId) : null;
+    if (!me) return fail('只有本店前厅可登记借出物品');
+    if (o.roomId && !room) return fail('房间不在当前门店');
+    var name = String(o.name || '').trim().slice(0, 60);
+    var count = Number(o.count);
+    if (!name || !Number.isInteger(count) || count < 1 || count > 99)
+      return fail('请输入物品名称和1至99件的实际借出数量');
+    var mode = o.mode === 'overnight' ? 'overnight' : 'outbound';
+    if (mode === 'overnight' && !room) return fail('房内过夜借用必须选择房间');
+    var delivery = o.delivery === 'housekeeping' ? 'housekeeping' : 'frontdesk';
+    if (!room && delivery === 'housekeeping') return fail('客房送达需选择房间');
+    var key = String(o.clientKey || '').trim();
+    var old = key && DB.findOne('guestRequests',function(r){
+      return AuthContext.inScope(r) && r.clientKey === key && r.loan && r.loan.name === name;
+    });
+    if (old) return { ok:true, repeated:true, request:old };
+    var req;
+    if (room) {
+      var created = delivery === 'housekeeping'
+        ? GuestReq.create({
+          roomId:room.id, type:'hk_other', content:'借用：' + name + ' ×' + count +
+            (mode === 'overnight' ? '（房内过夜）' : '（带出使用）'),
+          source:'前厅借物', count:count, clientKey:key
+        })
+        : GuestReq.create({
+          roomId:room.id, type:'hk_other', content:'借用：' + name + ' ×' + count,
+          source:'前厅借物', count:count, clientKey:key,
+          directResolve:true, result:'前厅已当面交付借物'
+        });
+      if (!created || !created.ok) return created || fail('借物登记失败');
+      req = created.request;
+    } else {
+      var scope = AuthContext.scope(), now = Date.now();
+      req = DB.insert('guestRequests', AuthContext.stamp({
+        id:U.uid('gq'), code:'FW' + U.ymd().replace(/-/g,'') + '-' + U.pad2(DB.nextSeq('FW')),
+        roomId:'', roomNo:'', source:'前厅当面借出', creatorId:me.id, creatorName:me.name,
+        guestRequestType:'hk_other', typeName:'借用品', content:'借用：' + name + ' ×' + count,
+        count:count, routedDept:'d_fo', followDeptId:'d_fo',
+        status:'done', result:'前厅已当面交付', createdAt:now, acceptedAt:now,
+        completedAt:now, clientKey:key, taskId:'', workOrderId:'',
+        currentOwnerId:me.id, alsoVisible:[], guestNote:''
+      }));
+    }
+    DB.update('guestRequests',req.id,{
+      loan:{ name:name, qty:count, returned:0, mode:mode, delivery:delivery,
+        actualHandoverAt:delivery==='frontdesk'?Date.now():0, returns:[] }
+    });
+    if(room) RoomSvc.tl(room.id,'loan','登记借用 ' + name + ' ×' + count +
+      (mode === 'overnight' ? '（房内过夜）' : '（带出使用）'),
+      {refType:'guestRequest',refId:req.id});
+    return {ok:true,request:DB.byId('guestRequests',req.id)};
+  }
+  function loanReturn(id,qty,note) {
+    var req=DB.byId('guestRequests',id), me=Engine.Session.user();
+    if(!req || !AuthContext.inScope(req) || !req.loan) return fail('借用记录不存在');
+    var allowed=me && (Policy.can(me,'frontdesk') ||
+      (!!req.roomId && req.loan.mode==='overnight' && Policy.can(me,'clean')));
+    if(!allowed || (me.roles||[]).indexOf('developer')>=0) return fail('当前岗位无权核实该物品归还');
+    if(!Policy.can(me,'frontdesk') && typeof Presence !== 'undefined' && !Presence.isWorking(me.id))
+      return fail('客房员工需要在当班中核实房内借用品归还');
+    if(req.status!=='done') return fail('物品尚未完成交付，不能确认归还');
+    var n=Number(qty), loan=req.loan, remain=loan.qty-loan.returned;
+    if(!Number.isInteger(n) || n<1 || n>remain) return fail('归还数量超出当前未归还数量');
+    var copy=Object.assign({},loan,{
+      returned:loan.returned+n,
+      returns:(loan.returns||[]).concat([{qty:n,by:me.id,at:Date.now(),note:String(note||'').slice(0,150)}])
+    });
+    DB.update('guestRequests',id,{loan:copy});
+    if(req.roomId) RoomSvc.tl(req.roomId,'loan','实物核实已收回 '+loan.name+' ×'+n,
+      {refType:'guestRequest',refId:id});
+    Engine.Audit.write({targetType:'guestRequest',targetId:id,targetName:req.code,
+      action:'确认借物归还',field:'loan.returned',from:loan.returned,to:copy.returned,
+      reason:'现场核实数量 '+n});
+    return {ok:true,request:DB.byId('guestRequests',id),remaining:copy.qty-copy.returned};
+  }
+  function outstanding(roomId,forCleaning) {
+    var me=Engine.Session.user();
+    if(!me) return [];
+    return DB.find('guestRequests',function(r){
+      if(!AuthContext.inScope(r) || !r.loan || r.status!=='done' || r.loan.returned>=r.loan.qty)return false;
+      if(roomId && r.roomId!==roomId)return false;
+      if(forCleaning) return !!r.roomId && r.loan.mode==='overnight' && Policy.can(me,'clean');
+      return Policy.can(me,'frontdesk') || (!!r.roomId && r.loan.mode==='overnight' && Policy.can(me,'clean'));
+    }).sort(function(a,b){return a.createdAt-b.createdAt;});
+  }
+  function roomHints(roomId,forCleaning) {
+    var loans=outstanding(roomId,!!forCleaning);
+    var lost=forCleaning ? [] : DB.find('lostItems',function(x){
+      return AuthContext.inScope(x) && x.roomId===roomId && x.status==='reported';
+    });
+    return {loans:loans,lost:lost};
+  }
+  function dailyCleaning(date,userId) {
+    date=date || U.ymd();
+    var arr=DB.find('roomClean',function(c){
+      return AuthContext.inScope(c) && c.endedAt && U.ymd(c.endedAt)===date
+        && c.result==='normal' && (!userId || c.cleanerId===userId);
+    });
+    var work=0,byType={},byRoomType={},byPerson={};
+    arr.forEach(function(c){
+      var unit=c.piece ? Number(c.workloadSnapshot || 1) : 0;
+      work+=unit;
+      var ct=c.typeName || c.type || '其它',rt=c.roomTypeSnapshot || '未记录房型';
+      byType[ct]=(byType[ct]||0)+1;
+      byRoomType[rt]=(byRoomType[rt]||0)+1;
+      var person=byPerson[c.cleanerId]||(byPerson[c.cleanerId]={
+        id:c.cleanerId,name:c.cleaner||DB.userName(c.cleanerId),rooms:0,workload:0,byType:{} });
+      person.rooms++;person.workload+=unit;
+      person.byType[ct]=(person.byType[ct]||0)+1;
+    });
+    return {date:date,count:arr.length,workload:Math.round(work*100)/100,
+      byType:byType,byRoomType:byRoomType,
+      byPerson:Object.keys(byPerson).map(function(k){return byPerson[k];}),
+      records:arr};
+  }
+  function dailyEngineering(date) {
+    date=date||U.ymd();
+    var list=DB.find('workOrders',function(w){return AuthContext.inScope(w);});
+    return {date:date,created:list.filter(function(w){return U.ymd(w.createdAt)===date;}).length,
+      completed:list.filter(function(w){return w.finishAt && U.ymd(w.finishAt)===date;}).length,
+      open:list.filter(function(w){return ['done','closed'].indexOf(w.status)<0;}).length};
+  }
+  function dailyFront(date) {
+    date=date||U.ymd();
+    return { date:date,
+      siteChecks:DB.find('tasks',function(t){return AuthContext.inScope(t)&&t.type==='room_site_check'&&U.ymd(t.createdAt)===date;}).length,
+      siteCompleted:DB.find('tasks',function(t){return AuthContext.inScope(t)&&t.type==='room_site_check'&&t.completedAt&&U.ymd(t.completedAt)===date;}).length,
+      guestRequests:DB.find('guestRequests',function(r){return AuthContext.inScope(r)&&U.ymd(r.createdAt)===date;}).length,
+      handovers:DB.find('handovers',function(h){return AuthContext.inScope(h)&&U.ymd(h.createdAt)===date;}).length };
+  }
+  return { PURPOSES:PURPOSES,PRESENCE:PRESENCE,
+    siteCreate:siteCreate,siteFinish:siteFinish,siteOpen:siteOpen,hourlyExtend:hourlyExtend,repairCreate:repairCreate,
+    loanCreate:loanCreate,loanReturn:loanReturn,outstanding:outstanding,roomHints:roomHints,
+    dailyCleaning:dailyCleaning,dailyEngineering:dailyEngineering,dailyFront:dailyFront };
+})();
+
+</script>
+<script>
 /* ==========================================================================
  * core/issue.js —— 物资领用与单价快照（V4.3.1 §5 / §7 / §11）
  * ---------------------------------------------------------------------------
@@ -14547,6 +14907,8 @@ function staffEntries(u) {
     if (Policy.businessEnabled('sales', u.hotelId)) add('go-sales', '销售预订待确认', '🛏', '#faf4e9');
     if (Policy.businessEnabled('guest_breakfast', u.hotelId)) add('go-breakfast-forecast', '住客早餐', '🥐', '#e7f6ef');
     add('go-guest-hk', '客房临时任务', '🧺', '#f0ecfd');
+    add('go-front-site', '发起客房查房', '🔍', '#eaf1fd');
+    add('go-front-repair', '发起工程工单', '🛠️', '#fdf1e5');
     add('go-handover', '交接班', '🔄', '#eaf1fd');
   }
 
@@ -14567,14 +14929,23 @@ function staffEntries(u) {
 /* 前厅核心责任显式优先；更多业务保留全部已授权能力。 */
 function staffEntryGroups(u) {
   var ops = staffEntries(u);
-  /* 前厅确认采用单层入口，不再为两项低频业务增加折叠点击。
-   * 附加授权能力仍保留入口，排序在本职事项之后。 */
+  /* 前厅按真实使用频率排列：前五项固定，早餐/销售/团餐放在末尾。
+   * 发起工程工单是独立操作，但不挤占用户指定的前五顺序。 */
   if (Policy.can(u, 'frontdesk')) {
-    var order = ['go-handover','go-guest-hk','go-breakfast-forecast','go-room-swap','go-sales','tm-new','go-meal'];
-    return { primary: ops.slice().sort(function(a,b){
-      var ia=order.indexOf(a.k),ib=order.indexOf(b.k);
-      return (ia<0?100:ia)-(ib<0?100:ib);
-    }), more: [] };
+    var first = ['go-guest-hk','go-room-swap','go-front-site','go-handover','go-meal'];
+    var tail = ['go-breakfast-forecast','go-sales','tm-new'];
+    var middle = ['go-front-repair'];
+    function rank(k) {
+      var p=first.indexOf(k);
+      if(p>=0)return p;
+      var m=middle.indexOf(k);
+      if(m>=0)return first.length+m;
+      var t=tail.indexOf(k);
+      if(t>=0)return 100+t;
+      return 50;
+    }
+    var sorted=ops.slice().sort(function(a,b){return rank(a.k)-rank(b.k);});
+    return {primary: sorted,more:[]};
   }
   /* 工作台根据实际职责排列；能力权限负责可达，不等于全部常驻首页。 */
   var core = Policy.can(u, 'frontdesk')
@@ -15054,6 +15425,7 @@ App.page('task', {
     var wo = t.woId ? DB.byId('workOrders', t.woId) : null;
     var isRoomCleanTask = t.type === 'housekeeping' && !!t.roomId;
     var isRoomInspectionTask = t.type === 'room_inspection' && !!t.roomId;
+    var isSiteCheckTask = t.type === 'room_site_check' && !!t.roomId;
     var linkedClean = isRoomCleanTask
       ? DB.findOne('roomClean', function (x) { return x.taskId === t.id && !x.endedAt; }) : null;
     var linkedInspection = isRoomInspectionTask
@@ -15094,13 +15466,30 @@ App.page('task', {
           + (item.content && item.content !== item.typeName ? '：' + item.content : '')) : '';
       }).filter(Boolean).join('；');
     }
-    if (t.type === 'guest_service' || (t.type === 'housekeeping' && t.roomId) || t.type === 'room_inspection') {
+    if (t.type === 'guest_service' || (t.type === 'housekeeping' && t.roomId) || t.type === 'room_inspection' || isSiteCheckTask) {
       var taskPlace = t.roomId ? DB.roomNo(t.roomId) + ' 房' : (t.location || '未填写位置');
       html += '<div class="card" style="border:2px solid #d5e2f0;background:#f6f9fd">'
         + '<div class="t-xs c2">📍 到哪里</div><div class="t-lg t-w6 mt8">' + U.esc(taskPlace) + '</div>'
         + '<div class="t-xs c2 mt12">🧺 要做什么</div>'
         + '<div class="t-lg t-w6 mt8" style="line-height:1.45;overflow-wrap:anywhere">' + U.esc(actualInstruction || t.title || '请查看任务要求') + '</div>'
         + '</div>';
+    }
+
+    /* Only the relevant room's overnight loan is carried into its cleaning task.
+     * External borrowed items never become a general housekeeping todo. */
+    if (isRoomCleanTask && t.roomId && typeof OpsFlow !== 'undefined') {
+      var roomLoans = OpsFlow.outstanding(t.roomId,true);
+      if (roomLoans.length) {
+        html += '<div class="card"><div class="card-title">这间房有借用品待核实 · 不影响可售</div>'
+          + roomLoans.map(function (req) {
+            return '<div class="row-b mt8"><div class="grow"><div class="t-sm">'
+              + U.esc(req.loan.name) + ' · 尚未收回 ' + (req.loan.qty-req.loan.returned) + ' 件</div>'
+              + '<div class="t-xs c3 mt8">只在实际看到或收到物品后确认，不用另建任务</div></div>'
+              + (isOnDuty && isAssignee && t.status==='doing'
+                ? '<button class="btn btn-ghost btn-sm" data-act="loan-return" data-id="' + req.id + '">确认已收回</button>' : '')
+              + '</div>';
+          }).join('') + '</div>';
+      }
     }
 
     /* 房间型客房任务：当前动作必须首屏可见。接单≠到房≠开始。 */
@@ -15165,11 +15554,29 @@ App.page('task', {
       }
     }
 
+    /* 钟点房催退/房间有人/房卡/行李的核实只负责事实反馈，不修改清洁质量或 PMS。 */
+    if (isSiteCheckTask) {
+      var site = t.siteResult;
+      html += '<div class="card"><div class="card-title">前厅现场核实结果</div>'
+        + (t.siteExtendedUntil ? '<div class="notice mt8">前厅已通知加钟至 '+U.mdhm(t.siteExtendedUntil)+'，请按最新要求处理。</div>' : '')
+        + (site
+          ? '<div class="t-sm mt8">'+U.esc(OpsFlow.PRESENCE[site.presence] || '')
+            +' · 行李：'+U.esc(({yes:'有',no:'无',unknown:'无法确认'})[site.baggage]||'')
+            +' · 房卡：'+U.esc(({yes:'有',no:'无',unknown:'无法确认'})[site.roomCard]||'')+'</div>'
+            +(site.note?'<div class="t-xs c3 mt8">'+U.esc(site.note)+'</div>':'')
+          : '<div class="t-sm c2 mt8">只登记客人在不在、行李、房卡等事实，下一步由前厅决定。</div>')
+        + (t.status==='pending' && !t.assigneeId && canClaimPool
+          ? '<button class="btn btn-primary btn-block mt12" data-act="task-accept" data-id="'+t.id+'">接单并去现场核实</button>' : '')
+        + (t.status==='doing' && isAssignee
+          ? '<button class="btn btn-green btn-block mt12" data-act="site-result-open" data-id="'+t.id+'">提交现场核实结果</button>' : '')
+        + '</div>';
+    }
+
     /* 所有角色统一执行优先：详细资料默认折叠；权限决定能否查看，不决定是否占满首屏。 */
     var compactTaskDetail = true;
     var compactRoomInfo = compactTaskDetail;
     var detailFields = '<div class="card card-tight">'
-      + Comp.field('任务类型', U.esc({ inspection: '定时巡检', room_inspection: '客房查房', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
+      + Comp.field('任务类型', U.esc({ inspection: '定时巡检', room_inspection: '质量查房', room_site_check: '前厅现场核实', repair: '工程维修', housekeeping: '客房事务', complaint: '客诉处理', assign: '交办事项', purchase: '采购', maintenance: '设备保养', sop: 'SOP 检查', other: '其它' }[t.type] || '其它'))
       + Comp.field('责任部门', U.esc(DB.deptName(t.deptId)))
       + Comp.field('地点', U.esc(t.location || '—'))
       + Comp.field('任务来源', U.esc(displaySource || '—'))
@@ -15304,7 +15711,7 @@ App.page('task', {
     var isCreator = t.creatorId === me.id;
     var canManage = S.isManager() || S.isGM() || t.deptId === me.deptId && S.isManager();
     var acts = [];
-    if (!isRoomCleanTask && !isRoomInspectionTask && t.status !== 'done' && t.status !== 'closed') {
+    if (!isRoomCleanTask && !isRoomInspectionTask && !isSiteCheckTask && t.status !== 'done' && t.status !== 'closed') {
       if (t.status === 'pending' && (isAssignee || canClaimPool || canManage)) acts.push('<button class="btn btn-primary grow" data-act="task-accept" data-id="' + t.id + '">接单</button>');
       if (t.status === 'doing' && isAssignee) acts.push('<button class="btn btn-green grow" data-act="task-finish" data-id="' + t.id + '">完成</button>');
       if (t.status === 'checking' && (isCreator || canManage)) {
@@ -15388,7 +15795,10 @@ App.act('task-clean-pause-repair', function (el) {
   App.refresh();
 });
 App.act('task-accept', function (el) {
-  var res = Engine.Task.accept(el.getAttribute('data-id'));
+  var current = DB.byId('tasks', el.getAttribute('data-id'));
+  var res = current && current.type === 'room_site_check'
+    ? Pool.claim(current.id, Engine.Session.user().id)
+    : Engine.Task.accept(el.getAttribute('data-id'));
   if (!res || res.ok === false) { U.toast((res && res.reason) || '接单失败'); return; }
   DB.flush();
   U.toast(res.claimed ? '已接单，请到房扫码开始' : '已接单');
@@ -15590,6 +16000,41 @@ function woRow(w) {
     + (w.cost ? '<span class="chip chip-line" style="margin-left:6px">' + U.money0(w.cost) + '</span>' : '') + '</div></div>'
     + '<div class="li-arrow">›</div></div>';
 }
+/* OPS: only actual on-duty HK executor may submit structured site facts. */
+App.act('site-result-open',function(el){
+  var id=el.getAttribute('data-id'),t=DB.byId('tasks',id);
+  if(!t||t.type!=='room_site_check')return;
+  function options(rows) {return rows.map(function(x){return '<option value="'+x[0]+'">'+x[1]+'</option>';}).join('');}
+  App.sheet({
+    title: DB.roomNo(t.roomId)+' 房 · 现场核实',
+    body:'<div class="pad" style="padding:8px 18px">'
+      +'<div class="t-sm t-w6">现场人员情况</div>'
+      +'<select class="inp mt8" id="site-presence">'+options([['occupied','房内有人'],['empty','房内无人'],['unable','无法确认']])+'</select>'
+      +'<div class="t-sm t-w6 mt12">现场行李</div>'
+      +'<select class="inp mt8" id="site-baggage">'+options([['unknown','无法确认'],['yes','有行李'],['no','无行李']])+'</select>'
+      +'<div class="t-sm t-w6 mt12">房卡情况</div>'
+      +'<select class="inp mt8" id="site-card">'+options([['unknown','无法确认'],['yes','有房卡'],['no','无房卡']])+'</select>'
+      +'<textarea class="inp mt12" rows="2" id="site-note" placeholder="其它现场事实（选填）"></textarea>'
+      +'<details class="mt12"><summary class="t-sm">确实发现遗留物或设备故障？（可选）</summary>'
+      +'<div class="t-xs c3 mt8">行李在房内不等于遗留物；确认是遗留物才填写。</div>'
+      +'<textarea class="inp mt8" rows="2" id="site-lost" placeholder="已确认遗留物信息"></textarea>'
+      +'<textarea class="inp mt8" rows="2" id="site-repair" placeholder="需要报修的具体故障"></textarea></details></div>',
+    foot:'<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      +'<button class="btn btn-primary grow" data-act="site-result-submit" data-id="'+id+'">确认现场事实</button>'
+  });
+});
+App.act('site-result-submit',function(el){
+  var v=function(id){return ((document.getElementById(id)||{}).value||'').trim();};
+  var res=OpsFlow.siteFinish(el.getAttribute('data-id'),{
+    presence:v('site-presence'),baggage:v('site-baggage'),roomCard:v('site-card'),
+    note:v('site-note'),confirmedLost:v('site-lost'),repairNote:v('site-repair')
+  });
+  if(!res||!res.ok)return U.toast((res&&res.reason)||'现场核实未能提交');
+  DB.flush();App.closeSheet();
+  U.toast('现场核实已反馈前厅；后续事项按责任岗位流转');
+  App.refresh();
+});
+
 </script>
 <script>
 /* ==========================================================================
@@ -18639,7 +19084,7 @@ App.page('stats', {
 
     if (mod === 'overview') html += modOverview(range, rk);
     if (mod === 'repair') html += modRepair(range, rk);
-    if (mod === 'housekeeping') html += modHK(range, rk);
+    if (mod === 'housekeeping') html += modHK(range, rk, r.params.day || U.ymd());
     if (mod === 'meal') html += modMeal(range, rk);
     if (mod === 'purchase') html += modPurchase(range, rk);
     if (mod === 'inventory') html += modInventory(range, rk);
@@ -18648,6 +19093,11 @@ App.page('stats', {
   }
 });
 
+App.act('stats-hk-day', function () {
+  var val=((document.getElementById('stats-hk-day-input')||{}).value||'').trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(val))return U.toast('请选择有效日期');
+  App.go('stats?range='+RANGE_KEY+'&mod=housekeeping&day='+encodeURIComponent(val));
+});
 App.act('stats-range', function (el) {
   var mod = App.cur.params.mod || 'overview';
   App.go('stats?range=' + el.getAttribute('data-k') + '&mod=' + mod);
@@ -18694,7 +19144,12 @@ function modOverview(range, rk) {
 /* ---------------- 工程 ---------------- */
 function modRepair(range, rk) {
   var rp = Engine.Stats.repair(range);
-  var html = '<div class="card"><div class="card-head"><div class="card-title">' + U.esc(range.label) + '工程维修</div></div>'
+  var todayRepair=OpsFlow.dailyEngineering(U.ymd());
+  var dayPanel='<div class="card"><div class="card-title">今日工程实绩（创建/完成分开统计）</div>'
+    +'<div class="t-sm mt8">今日新报修 '+todayRepair.created+' · 今日已完工 '+todayRepair.completed
+    +' · 当前未结 '+todayRepair.open+'</div>'
+    +'<div class="t-xs c3 mt8">昨日报修今日完成，仍计入今日完工；当前未结为实时存量。</div></div>';
+  var html = dayPanel + '<div class="card"><div class="card-head"><div class="card-title">' + U.esc(range.label) + '工程维修</div></div>'
     + '<div class="kpi-grid c3">'
     + '<div class="kpi"><div class="v">' + rp.total + '</div><div class="k">报修数量</div></div>'
     + '<div class="kpi"><div class="v">' + rp.avgRespond + ' 分</div><div class="k">平均响应</div></div>'
@@ -18733,9 +19188,30 @@ function modRepair(range, rk) {
 }
 
 /* ---------------- 客房 ---------------- */
-function modHK(range, rk) {
+function modHK(range, rk, date) {
   var hk = Engine.Stats.housekeeping(range);
-  var html = '<div class="card"><div class="card-head"><div class="card-title">' + U.esc(range.label) + '客房事务</div></div>'
+  var daily=OpsFlow.dailyCleaning(date);
+  var dailyPanel='<div class="card"><div class="card-head"><div class="card-title">每日清扫实绩 · 按完成日期</div></div>'
+    + '<div class="row mt8" style="gap:8px"><input class="inp grow" id="stats-hk-day-input" type="date" value="'+U.esc(date)+'">'
+    + '<button class="btn btn-sm btn-primary" data-act="stats-hk-day">查看当天</button></div>'
+    + '<div class="kpi-grid c3 mt12"><div class="kpi"><div class="v">'+daily.count+'</div><div class="k">实际完成间次</div></div>'
+    + '<div class="kpi"><div class="v">'+daily.workload+'</div><div class="k">清扫工作量</div></div>'
+    + '<div class="kpi"><div class="v">'+daily.byPerson.length+'</div><div class="k">执行员工</div></div></div>'
+    + '<div class="t-xs c3 mt8">按真实完成时间统计；返工/简易整理按现有计件规则计量，保留完成时房型与工作量快照。仅统计业务工作量，不自动计算工资。</div>'
+    + '<div class="t-sm t-w6 mt12">清扫类型</div>'
+    + (Object.keys(daily.byType).length ? Object.keys(daily.byType).map(function(k){
+      return '<div class="t-sm mt8">'+U.esc(k)+'：'+daily.byType[k]+' 间次</div>';
+    }).join(''):'<div class="t-sm c3 mt8">当日暂无已完成记录</div>')
+    + '<div class="t-sm t-w6 mt12">房型</div>'
+    + Object.keys(daily.byRoomType).map(function(k){
+      return '<div class="t-sm mt8">'+U.esc(k)+'：'+daily.byRoomType[k]+' 间次</div>';
+    }).join('')
+    + '<div class="t-sm t-w6 mt12">个人工作量</div>'
+    + daily.byPerson.map(function(p){
+      return '<div class="row-b mt8"><div class="t-sm">'+U.esc(p.name)+'</div>'
+        +'<div class="t-sm t-w6">'+p.rooms+' 间次 · '+Math.round(p.workload*100)/100+' 工作量</div></div>';
+    }).join('')+'</div>';
+  var html = dailyPanel + '<div class="card"><div class="card-head"><div class="card-title">' + U.esc(range.label) + '客房事务</div></div>'
     + '<div class="kpi-grid c3">'
     + '<div class="kpi"><div class="v">' + hk.total + '</div><div class="k">客房任务</div></div>'
     + '<div class="kpi"><div class="v">' + hk.cat.length + '</div><div class="k">问题类别</div></div>'
@@ -19103,6 +19579,23 @@ App.page('room', {
     /* 当前工单 */
     html += Comp.sectionTitle('当前事项');
     html += p.openTasks.length ? '<div class="list">' + p.openTasks.map(Comp.taskRow).join('') + '</div>' : Comp.empty('当前无进行中事项', '✅');
+
+    /* 房间未结借用品与发现物品只作业务提醒，不加入内部可售阻断条件。 */
+    if (typeof OpsFlow !== 'undefined') {
+      var hints=OpsFlow.roomHints(rm.id,false);
+      if (hints.loans.length || hints.lost.length) {
+        html += '<div class="card"><div class="card-title">房间业务标记 · 不影响可售状态</div>'
+          + hints.loans.map(function(x){
+            return '<div class="li" data-act="gq-open" data-id="'+x.id+'"><div class="grow"><div class="t-sm">'
+              +U.esc(x.loan.name)+' · 待归还 '+(x.loan.qty-x.loan.returned)+' 件</div>'
+              +'<div class="t-xs c3 mt8">'+(x.loan.mode==='overnight'?'房内过夜':'借出外用')+' · 来源于原客需记录</div></div>'
+              +'<div class="li-arrow">›</div></div>';
+          }).join('')
+          + hints.lost.map(function(x){
+            return '<div class="t-sm mt8">发现物品：'+U.esc(x.note)+' · 已通知前厅按酒店制度处理</div>';
+          }).join('')+'</div>';
+      }
+    }
 
     /* 重复故障按分类 */
     var repKeys = Object.keys(repeat).filter(function (k) { return repeat[k] >= 2; });
@@ -19814,10 +20307,11 @@ App.page('hk', {
     var myDone = DB.find('roomClean', function (c) {
       return U.ymd(c.startedAt) === today && c.cleanerId === me.id && c.endedAt && c.result === 'normal';
     });
-    var workload = 0;
-    myDone.forEach(function (c) { if (c.piece) workload += (c.workloadSnapshot || 1); });
+    /* 计量归属实际完成日期，跨日作业不得记到开始日。 */
+    var daily = OpsFlow.dailyCleaning(today, me.id);
+    var workload = daily.workload;
     html += '<div class="card mt12"><div class="kpi-grid c3">'
-      + '<div class="kpi"><div class="v">' + myDone.length + '</div><div class="k">今日已清扫</div></div>'
+      + '<div class="kpi"><div class="v">' + daily.count + '</div><div class="k">今日已清扫</div></div>'
       + '<div class="kpi"><div class="v c-blue">' + workload + '</div><div class="k">今日工作量</div></div>'
       + '<div class="kpi"><div class="v ' + (work.tasks.length ? 'c-orange' : '') + '">' + work.tasks.length + '</div><div class="k">待处理事项</div></div>'
       + '</div></div>';
@@ -22919,7 +23413,8 @@ App.page('guest-hk-new', {
       + '<div class="t-xs c3 mt8">每项可分别调整数量；一次派给客房。</div></div>'
       + '<div class="pad mt12"><button class="btn btn-primary btn-block" data-act="gq-quick-save">派给客房</button>'
       + '<button class="btn btn-ghost btn-block mt12" data-act="gq-quick-repair">设备故障？直接报修给工程</button>'
-      + '<button class="btn btn-ghost btn-block mt12" data-act="gq-quick-clean">客人要求重新打扫？单独登记</button></div>';
+      + '<button class="btn btn-ghost btn-block mt12" data-act="gq-quick-clean">客人要求重新打扫？单独登记</button>'
+      + (Policy.can(me,'frontdesk') ? '<button class="btn btn-ghost btn-block mt12" data-act="go-front-loan">客人借用品记录（含外借/过夜）</button>' : '') + '</div>';
     return html;
   }
 });
@@ -23104,6 +23599,19 @@ App.page('guest-request', {
       + (x.result ? '<div class="t-xs c3 mt8">结果：' + U.esc(x.result) + '</div>' : '')
       + (x.transferNote ? '<div class="t-xs c3 mt8">转办：' + U.esc(x.transferNote) + '</div>' : '')
       + '</div>';
+    if (x.loan) {
+      var remaining=x.loan.qty-x.loan.returned;
+      html += '<div class="card"><div class="card-title">借用品 · 原客需持续记录</div>'
+        + '<div class="t-sm mt8">'+U.esc(x.loan.name)+' ×'+x.loan.qty
+        +' · '+(x.loan.mode==='overnight'?'房内过夜':'借出外用')+'</div>'
+        + '<div class="t-sm c2 mt8">已核实归还 '+x.loan.returned+'，剩余 '+remaining
+        +(x.status!=='done'?'；尚待客房交付':'')+'</div>'
+        + (remaining>0 && x.status==='done'
+           && (Policy.can(Engine.Session.user(),'frontdesk')
+             || (x.roomId && x.loan.mode==='overnight' && Policy.can(Engine.Session.user(),'clean')))
+          ? '<button class="btn btn-ghost btn-block mt12" data-act="loan-return" data-id="'+x.id+'">核实已收到归还物品</button>'
+          : '')+'</div>';
+    }
     var me = Engine.Session.user();
     var canFrontdeskClaimQr = x.source === 'guest_qr' && x.status === 'pending'
       && x.taskId && x.guestRequestType !== 'clean' && Policy.can(me, 'frontdesk');
@@ -23227,6 +23735,190 @@ App.act('gq-transfer-save', function (el) {
   U.toast(res.ok ? '已转办' : res.reason);
   if (res.ok) { DB.flush(); App.closeSheet(); App.refresh(); }
 });
+</script>
+<script>
+/* OPS-01~06 mobile entry points: reuse existing task, guest request and repair models. */
+(function () {
+  function currentRoom(no) {
+    no = String(no || '').trim();
+    if (!no) return null;
+    return DB.findOne('rooms', function (r) {
+      return String(r.number) === no && AuthContext.inScope(r) && r.active !== 0;
+    });
+  }
+  function allowed() {
+    var me = Engine.Session.user();
+    return !!me && Policy.can(me, 'frontdesk');
+  }
+  function roomField(id, required) {
+    var rooms = DB.find('rooms', function (r) { return AuthContext.inScope(r) && r.active !== 0; })
+      .sort(function (a,b) { return String(a.number).localeCompare(String(b.number),'zh-CN',{numeric:true}); });
+    return '<input class="inp" id="' + id + '" list="' + id + '-list" inputmode="numeric" placeholder="' +
+      (required ? '输入本店房号（必填）' : '房号（公共区域可留空）') + '">'
+      + '<datalist id="' + id + '-list">' + rooms.map(function (r) {
+        return '<option value="' + U.esc(r.number) + '"></option>';
+      }).join('') + '</datalist>';
+  }
+  var keySite='', keyRepair='', keyLoan='', siteBusy=false,repairBusy=false,loanBusy=false;
+
+  App.page('front-site-check', {
+    title:'发起查房',
+    render:function () {
+      if(!allowed())return Comp.empty('只有前厅可以发起现场核实查房','🔒');
+      if(!keySite)keySite=U.uid('site-submit');
+      return '<div class="card mt12"><div class="card-title">前厅现场核实 · 不属于清扫质量查房</div>'
+        + '<div class="t-sm c2 mt8">适用：钟点房到点催退、超时未退、核实房内是否有人、行李或房卡情况。客房只反馈现场事实，是否退房、加钟或联系客人由前厅决定。</div></div>'
+        + '<div class="card"><div class="t-sm t-w6">房号</div>'+roomField('front-site-room',true)
+        + '<div class="t-sm t-w6 mt16">核实原因</div><select class="inp mt8" id="front-site-purpose">'
+        + Object.keys(OpsFlow.PURPOSES).map(function(k){return '<option value="'+k+'">'+U.esc(OpsFlow.PURPOSES[k])+'</option>';}).join('')
+        + '</select><div class="t-sm t-w6 mt16">说明（可不填）</div>'
+        + '<textarea class="inp mt8" id="front-site-note" rows="2" placeholder="如：钟点房已到约定退房时间，请核实有无客人、行李、房卡"></textarea>'
+        + '<button class="btn btn-primary btn-block mt16" data-act="front-site-send">发给客房现场核实</button></div>'
+        + '<div class="card"><div class="card-title">钟点房加钟通知</div>'
+        + '<div class="t-sm c2 mt8">使用上面填写的房号。只记录新的预计离房时间并通知客房，不生成第二张查房任务、不替代 PMS 修改房态。</div>'
+        + '<div class="t-sm t-w6 mt12">新预计离房时间</div>'
+        + '<input class="inp mt8" type="datetime-local" id="front-site-until">'
+        + '<button class="btn btn-ghost btn-block mt12" data-act="front-site-extend">通知客房：已加钟</button></div>';
+    }
+  });
+  App.act('go-front-site',function(){App.go('front-site-check');});
+  App.act('front-site-send',function(){
+    if(siteBusy)return U.toast('正在提交，请勿重复点击');
+    var room=currentRoom((document.getElementById('front-site-room')||{}).value);
+    if(!room)return U.toast('请输入本店有效房号');
+    siteBusy=true;
+    var result=OpsFlow.siteCreate({
+      roomId:room.id,
+      purpose:(document.getElementById('front-site-purpose')||{}).value,
+      note:(document.getElementById('front-site-note')||{}).value,
+      clientKey:keySite
+    });
+    siteBusy=false;
+    if(!result||!result.ok)return U.toast((result&&result.reason)||'发起查房失败');
+    DB.flush();keySite='';
+    U.toast(result.reused?'这间房已有待核实任务，已合并核实目的':'已发给客房现场核实');
+    App.go('task/'+result.task.id);
+  });
+  App.act('front-site-extend',function(){
+    var room=currentRoom((document.getElementById('front-site-room')||{}).value);
+    if(!room)return U.toast('请输入本店有效房号');
+    var raw=(document.getElementById('front-site-until')||{}).value||'';
+    var until=new Date(raw).getTime();
+    var res=OpsFlow.hourlyExtend({roomId:room.id,until:until});
+    if(!res||!res.ok)return U.toast((res&&res.reason)||'加钟记录失败');
+    DB.flush();U.toast('加钟信息已更新，并通知当班客房；没有生成新工单');App.go('home');
+  });
+
+  App.page('front-repair', {
+    title:'发起工程工单',
+    render:function(){
+      if(!allowed())return Comp.empty('没有前厅报修权限','🔒');
+      if(!keyRepair)keyRepair=U.uid('repair-submit');
+      var types=(DICT.issueTypes||[]).filter(function(t){return t.repair;});
+      return '<div class="card mt12"><div class="card-title">前厅直接报修给工程</div>'
+        + '<div class="t-sm c2 mt8">复用原工程报修与工单流程，不经过客房临时任务。相同未结故障会提示原工单。</div></div>'
+        + '<div class="card"><div class="t-sm t-w6">房间（公共区域可留空）</div>'
+        + roomField('front-repair-room',false)
+        + '<div class="t-sm t-w6 mt12">公共区域（无房号时填）</div>'
+        + '<input class="inp mt8" id="front-repair-area" placeholder="例如：大堂/走廊/厨房">'
+        + '<div class="t-sm t-w6 mt12">故障类别</div>'
+        + '<select class="inp mt8" id="front-repair-type">'+types.map(function(t){
+          return '<option value="'+t.key+'">'+U.esc(t.name)+'</option>';
+        }).join('')+'</select>'
+        + '<div class="t-sm t-w6 mt12">故障描述</div><textarea class="inp mt8" id="front-repair-note" rows="3" placeholder="请描述真实故障，避免仅写“坏了”"></textarea>'
+        + '<button class="btn btn-primary btn-block mt16" data-act="front-repair-send">发送工程工单</button></div>';
+    }
+  });
+  App.act('go-front-repair',function(){App.go('front-repair');});
+  App.act('front-repair-send',function(){
+    if(repairBusy)return U.toast('正在提交，请勿重复点击');
+    var no=(document.getElementById('front-repair-room')||{}).value||'';
+    var room=no.trim()?currentRoom(no):null;
+    if(no.trim()&&!room)return U.toast('房号无效，请检查');
+    repairBusy=true;
+    var res=OpsFlow.repairCreate({
+      roomId:room?room.id:'', area:(document.getElementById('front-repair-area')||{}).value,
+      issueType:(document.getElementById('front-repair-type')||{}).value,
+      note:(document.getElementById('front-repair-note')||{}).value,
+      clientKey:keyRepair
+    });
+    repairBusy=false;
+    if(!res||!res.ok)return U.toast((res&&res.reason)||'报修失败');
+    keyRepair='';DB.flush();
+    U.toast(res.reused?'已有相同未完成报修，已打开原工单':'工程报修已发出');
+    App.go('wo/'+res.wo.id);
+  });
+
+  App.page('front-loan', {
+    title:'客人借用品',
+    render:function(){
+      if(!allowed())return Comp.empty('只有前厅可以登记借出物品','🔒');
+      if(!keyLoan)keyLoan=U.uid('loan-submit');
+      var loans=OpsFlow.outstanding('',false);
+      return '<div class="card mt12"><div class="card-title">借物登记 · 使用原客需记录</div>'
+        + '<div class="t-sm c2 mt8">借往房间过夜与借出外用分开标明；归还时间不确定时不强填。前厅当面交付不产生客房任务；需要客房送到房间才创建原客需执行任务。</div></div>'
+        + '<div class="card"><div class="t-sm t-w6">房号（外借未关联房间可留空）</div>'
+        + roomField('front-loan-room',false)
+        + '<div class="t-sm t-w6 mt12">物品</div><input class="inp mt8" id="front-loan-name" placeholder="例如：雨伞、充电器、加被">'
+        + '<div class="t-sm t-w6 mt12">实际借出数量</div><input class="inp mt8" id="front-loan-count" type="number" min="1" max="99" value="1">'
+        + '<div class="t-sm t-w6 mt12">使用方式</div>'
+        + '<select class="inp mt8" id="front-loan-mode"><option value="outbound">借出外用（归还时间不确定）</option><option value="overnight">房内过夜</option></select>'
+        + '<div class="t-sm t-w6 mt12">实际交付方式</div>'
+        + '<select class="inp mt8" id="front-loan-delivery"><option value="frontdesk">前厅已当面交付</option><option value="housekeeping">客房送到房间</option></select>'
+        + '<button class="btn btn-primary btn-block mt16" data-act="front-loan-save">保存借出记录</button></div>'
+        + '<div class="card"><div class="card-title">尚未归还（不生成额外工单）</div>'
+        + (loans.length?loans.slice(0,25).map(function(r){
+          return '<div class="li" data-act="gq-open" data-id="'+r.id+'"><div class="grow"><div class="t-sm t-w6">'
+            + U.esc((r.roomNo?r.roomNo+' 房 · ':'前厅 · ')+r.loan.name)+'</div>'
+            + '<div class="t-xs c3 mt8">剩余 '+(r.loan.qty-r.loan.returned)+' 件 · '
+            +(r.loan.mode==='overnight'?'房内过夜':'借出外用')+'</div></div><div class="li-arrow">›</div></div>';
+        }).join(''):Comp.empty('暂无待归还物品','✅'))+'</div>';
+    }
+  });
+  App.act('go-front-loan',function(){App.go('front-loan');});
+  App.act('front-loan-save',function(){
+    if(loanBusy)return U.toast('正在记录，请勿重复点击');
+    var no=(document.getElementById('front-loan-room')||{}).value||'';
+    var room=no.trim()?currentRoom(no):null;
+    if(no.trim()&&!room)return U.toast('房号无效');
+    loanBusy=true;
+    var res=OpsFlow.loanCreate({
+      roomId:room?room.id:'', name:(document.getElementById('front-loan-name')||{}).value,
+      count:Number((document.getElementById('front-loan-count')||{}).value),
+      mode:(document.getElementById('front-loan-mode')||{}).value,
+      delivery:(document.getElementById('front-loan-delivery')||{}).value,
+      clientKey:keyLoan
+    });
+    loanBusy=false;
+    if(!res||!res.ok)return U.toast((res&&res.reason)||'借出记录失败');
+    keyLoan='';DB.flush();U.toast('已记录实物借出，归还进度与原记录关联');
+    App.go('guest-request/'+res.request.id);
+  });
+  App.act('loan-return',function(el){
+    var id=el.getAttribute('data-id');
+    var req=DB.byId('guestRequests',id);
+    if(!req||!req.loan)return;
+    var count=req.loan.qty-req.loan.returned;
+    App.sheet({
+      title:'实际收到归还物品',
+      body:'<div class="pad" style="padding:8px 18px"><div class="t-sm">请确认实际收回的 '+U.esc(req.loan.name)+' 数量，剩余 '+count+' 件。未实际收到请不要确认。</div>'
+        +'<input type="number" class="inp mt12" id="loan-return-count" min="1" max="'+count+'" value="'+count+'">'
+        +'<textarea class="inp mt12" rows="2" id="loan-return-note" placeholder="异常或交接说明（选填）"></textarea></div>',
+      foot:'<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+        +'<button class="btn btn-primary grow" data-act="loan-return-confirm" data-id="'+id+'">确认实物已收回</button>'
+    });
+  });
+  App.act('loan-return-confirm',function(el){
+    var id=el.getAttribute('data-id');
+    var result=OpsFlow.loanReturn(id,
+      Number((document.getElementById('loan-return-count')||{}).value),
+      (document.getElementById('loan-return-note')||{}).value);
+    if(!result||!result.ok)return U.toast((result&&result.reason)||'归还记录失败');
+    DB.flush();App.closeSheet();U.toast('已更新原借物记录的实际归还数量');
+    App.refresh();
+  });
+})();
+
 </script>
 <script>
 /* ==========================================================================
