@@ -1,61 +1,39 @@
-name: Deploy acceptance preview
-
+# Adopted through an independently reviewed configuration PR.
+# Branch Pages is the only publisher. This workflow has no Pages write permission.
+name: Acceptance release audit
 on:
-  push:
+  pull_request:
     branches: [main]
     paths:
-      - 'index.html'
       - '.github/workflows/pages.yml'
+      - '.nojekyll'
   workflow_dispatch:
-
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: acceptance-preview-pages
-  cancel-in-progress: true
-
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
         with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: .
-      - name: Deploy
-        id: deployment
-        uses: actions/deploy-pages@v4
-      - name: Verify live published acceptance page
-        env:
-          LIVE_URL: ${{ steps.deployment.outputs.page_url }}
+          persist-credentials: false
+      - name: Verify committed static page without publication
         run: |
-          set -euo pipefail
-          echo "Checking published acceptance page and release content."
-          for attempt in $(seq 1 16); do
-            if curl -fLsS --max-time 20 --retry 2 --retry-delay 2 --header 'Cache-Control: no-cache' "${LIVE_URL}?release=${GITHUB_SHA}" -o /tmp/hotelops-live.html; then
-              if cmp -s index.html /tmp/hotelops-live.html; then
-                python3 - <<'PY'
+          python3 - <<'PY'
+          import hashlib, json, re
           from pathlib import Path
-          body=Path('/tmp/hotelops-live.html').read_text(encoding='utf-8')
-          required=['acceptance-version','acceptance-bar','org-route-assign','DEV-006 组织赋权与任务路由专项版 [3ce2ae7f3676]']
-          for marker in required:
-              assert marker in body, f'Expected candidate marker missing: {marker}'
-          print(f'LIVE VERIFIED: exact index.html match, {len(body.encode())} bytes; UAT controls and DEV-006 revision present')
+          body = Path('index.html').read_bytes()
+          assert len(body) < 20_000_000, 'Unexpected page size'
+          for marker in [b'acceptance-version', b'acceptance-bar', b'App.start']:
+              assert marker in body, 'Acceptance page marker missing'
+          assert Path('.nojekyll').is_file() and Path('.nojekyll').read_bytes() == b'', 'Static Pages prerequisite missing'
+          checksum = hashlib.sha256(body).hexdigest()
+          if Path('release.json').exists():
+              release = json.loads(Path('release.json').read_text())
+              assert re.fullmatch('[a-f0-9]{40}', release['sourceSha']), 'Full source SHA required'
+              assert release['htmlSha256'] == checksum, 'Release checksum mismatch'
+              print('Source SHA:', release['sourceSha'])
+          print('Committed HTML SHA256:', checksum)
+          print('Read-only audit passed; this workflow did not publish or verify the live site')
           PY
-                exit 0
-              fi
-            fi
-            echo "Attempt ${attempt}: online content not yet matching committed index.html"
-            sleep 8
-          done
-          echo "Published page failed content check" >&2
-          exit 1
