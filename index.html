@@ -522,7 +522,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 <style>
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
-<meta name="hotelops-source-sha" content="5f886cc55a7905faf30b51ffc9bc93e8808f7798">
+<meta name="hotelops-source-sha" content="0db3ae86ff9379dd8f60c18237adfe5bf82d523e">
 </head>
 <body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="display:none;pointer-events:none;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-10 10:24 · 候选版本 [96f7171412cb]</div>
 
@@ -1346,8 +1346,7 @@ window.DB = (function () {
   };
 })();
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/seed.js —— 业务字典 & 测试数据生成器
  * 首次运行时自动生成一套完整酒店测试数据：
  * 100 间客房、8 个部门、15 名员工、设备台账、近 30 天巡检/报修/员工餐/采购记录
@@ -1368,6 +1367,7 @@ window.DICT = {
     { key: 'furniture', name: '家具/五金', icon: '🪑', dept: 'd_eng', repair: true, cat: '家具', dueMin: 240 },
     { key: 'elevator', name: '电梯', icon: '🛗', dept: 'd_eng', repair: true, cat: '电梯', dueMin: 20 },
     { key: 'kitchen', name: '厨房设备', icon: '🍳', dept: 'd_eng', repair: true, cat: '厨房设备', dueMin: 30 },
+    { key: 'eng_other', name: '其他维修', icon: '🛠️', dept: 'd_eng', repair: true, cat: '其他维修', dueMin: 60 },
     { key: 'clean', name: '卫生/清洁', icon: '🧹', dept: 'd_hk', repair: false, dueMin: 30 },
     { key: 'linen', name: '布草/客用品', icon: '🛏️', dept: 'd_hk', repair: false, dueMin: 30 },
     { key: 'smell', name: '异味/虫害', icon: '🌬️', dept: 'd_hk', repair: false, dueMin: 60 },
@@ -2339,8 +2339,7 @@ window.Seed = (function () {
       });
     }
   };
-})();
-</script>
+})();</script>
 <!-- V4：能力化权限 / 工作状态 / 部门任务池 / 客房作业 / 住客早餐 -->
 <script>/* ==========================================================================
  * core/policy.js —— 策略中心（V4 新增）
@@ -3227,17 +3226,6 @@ window.Pool = (function () {
     var sg = ServiceGuard.check({ record: t, capability: t.poolCap || '', action: 'task.write', write: true }); if (!sg.ok) return sg;
     if (t.status !== 'pending' && t.status !== 'wait' && !(t.status === 'doing' && t.claimBy === userId)) return { ok: false, reason: '任务当前状态不能接手' };
     if (t.claimBy === userId) return { ok: true, task: t, repeat: true };   // 幂等：重复点击
-    /* 现场核查一次只处理一间房；未完成本人的核查，不得再领取第二间。
-     * 不干涉已经验收通过的清扫、维修、送物等其它业务任务。 */
-    if (t.type === 'room_site_check') {
-      var activeSite = DB.findOne('tasks', function (x) {
-        return x.id !== t.id && AuthContext.inScope(x)
-          && x.type === 'room_site_check' && x.claimBy === userId
-          && x.status === 'doing';
-      });
-      if (activeSite) return {ok:false,reason:'请先完成 '+DB.roomNo(activeSite.roomId)+' 房核查，再接下一间'};
-    }
-
     if (t.claimBy) return { ok: false, reason: DB.userName(t.claimBy) + ' 正在处理', by: t.claimBy };
     if (typeof Presence !== 'undefined' && !Presence.isWorking(userId))
       return { ok: false, reason: '当前非当班，不能认领新的共享任务' };
@@ -3745,6 +3733,7 @@ window.RoomSvc = (function () {
     var old=item.decision||'';
     if(old===decision&&(item.decisionNote||'')===note && task.status==='done')
       return {ok:true,repeat:true,item:item};
+    if(item.status==='done')return {ok:false,reason:'客房已经执行完毕，如需另行处理请发起新事项'};
     if(task.status!=='done' && (task.status!=='doing'||task.claimBy!==me.id||task.assigneeId!==me.id))
       return {ok:false,reason:'请先接手该遗留物工单'};
     if(task.status!=='done') {
@@ -3774,6 +3763,25 @@ window.RoomSvc = (function () {
   }
 
   /** 清扫专用入口只负责验证在执行的原清扫，复用统一登记记录。 */
+  /* 前厅回复以后，原发现员工依据同一张记录完成现场动作；不创建第二张工单。 */
+  function lostExecute(itemId,note) {
+    var me=Engine.Session.me,item=DB.byId('lostItems',itemId);
+    if(!me||!Policy.can(me,'clean')||!item||!AuthContext.inScope(item)||item.reporterId!==me.id)
+      return {ok:false,reason:'只有原客房发现人员可以反馈执行结果'};
+    if(item.status==='done')return {ok:true,repeat:true,item:item};
+    if(item.status!=='instructed'||!item.decision)
+      return {ok:false,reason:'请先等待前厅回复处理方式'};
+    note=String(note||'').trim().slice(0,300);
+    if(!note)return {ok:false,reason:'请说明实际如何处理物品'};
+    var now=Date.now();
+    DB.update('lostItems',itemId,{status:'done',executedAt:now,executedBy:me.id,
+      executedNote:note});
+    tl(item.roomId,'lost','客房执行前厅遗留物指令：'+note,{refType:'lostItem',refId:itemId});
+    if(item.decisionBy)Engine.notify(item.decisionBy,{type:'info',
+      title:DB.roomNo(item.roomId)+' 房遗留物已处理',content:note,
+      refType:'lostItem',refId:itemId});
+    return {ok:true,item:DB.byId('lostItems',itemId)};
+  }
   function reportLostItem(cleanId, note, photos) {
     var clean = DB.byId('roomClean', cleanId);
     if (!clean || clean.endedAt) return { ok: false, reason: '没有进行中的清扫' };
@@ -4866,7 +4874,7 @@ window.RoomSvc = (function () {
     byToken: byToken, byNumber: byNumber, state: state, timeline: timeline, tl: tl,
     scanActions: scanActions,
     cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanWaitRepair: cleanWaitRepair, repairResolved: repairResolved, cleanFinish: cleanFinish, reportLostItem: reportLostItem, recordLostItem: recordLostItem,
-    lostClaim: lostClaim, lostDecide: lostDecide, lostItemsForRole: lostItemsForRole, LOST_DECISIONS: LOST_DECISIONS,
+    lostClaim: lostClaim, lostDecide: lostDecide, lostExecute:lostExecute, lostItemsForRole: lostItemsForRole, LOST_DECISIONS: LOST_DECISIONS,
     transferClean: transferClean,
     openClean: openClean, cleanToday: cleanToday, lastClean: lastClean,
     inspStart: inspStart, inspFinish: inspFinish, transferInspection: transferInspection, recheckStart: recheckStart, rectifyDone: rectifyDone,
@@ -6997,8 +7005,7 @@ window.Sales = (function () {
   };
 })();
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/engine.js —— 业务引擎
  * 承载全部业务规则：派单 / 流转 / 提醒升级 / 异常识别 / 员工餐 / 采购审批 / 库存
  * UI 层只负责渲染与调用，不写业务规则。
@@ -7773,6 +7780,15 @@ window.Engine = (function () {
         return x.inspectorId === uid && !!x.endedAt && U.ymd(x.endedAt) === key && AuthContext.inScope(x);
       }).length;
       done += doneInspections;
+      /* 由前厅发起、客房完成的现场查房应计入发起人的已完成历史。
+       * 只补本人非执行人的任务，防止同一任务重复计数。 */
+      if(Policy.can(DB.byId('users',uid),'frontdesk')) {
+        done+=DB.find('tasks',function(t){
+          return AuthContext.inScope(t)&&t.creatorId===uid&&t.assigneeId!==uid
+            && t.type==='room_site_check'&&t.status==='done'
+            && t.completedAt&&U.ymd(t.completedAt)===key;
+        }).length;
+      }
       /* Recurring instances are a separate audited table, not ordinary tasks.
        * Count only this person's actual execution; waiting for manager verification
        * is not yet completed work, and cannot be counted as closed. */
@@ -11524,13 +11540,48 @@ window.Engine = (function () {
         });
       });
 
+      /* 前厅查看本人发起的现场核查反馈；同一张任务已完成但反馈尚待确认。 */
+      if (Policy.can(me,'frontdesk') && typeof OpsFlow!=='undefined') {
+        DB.find('tasks',function(t){
+          return AuthContext.inScope(t) && t.type==='room_site_check'
+            && !!t.siteResult && t.siteFeedbackState==='unread'
+            && (t.creatorId===me.id || Policy.isSupervisor(me));
+        }).forEach(function(t){
+          out.push({id:'site-feedback:'+t.id,refType:'site-feedback',refId:t.id,
+            kind:'site-feedback',statusGroup:'confirm',priority:'high',
+            title:DB.roomNo(t.roomId)+' 房 · 查房反馈待查看',
+            subtitle:(OpsFlow.PRESENCE[t.siteResult.presence]||'')+' · 行李'+
+              ({yes:'有',no:'无',unknown:'未确认'})[t.siteResult.baggage]+' · 房卡'+
+              ({yes:'有',no:'无',unknown:'未确认'})[t.siteResult.roomCard],
+            route:'task/'+t.id,createdAt:t.siteFeedbackAt||t.completedAt||0});
+        });
+      }
+      /* 前厅指令后客房执行物品处理，原工单不新建第二张。 */
+      if (Policy.can(me,'clean') && typeof RoomSvc!=='undefined') {
+        RoomSvc.lostItemsForRole().filter(function(x){
+          return x.reporterId===me.id && x.status==='instructed';
+        }).forEach(function(x){
+          out.push({id:'lost-execute:'+x.id,refType:'lost-execute',refId:x.id,
+            kind:'lost-execute',statusGroup:'confirm',priority:'high',
+            title:DB.roomNo(x.roomId)+' 房 · 遗留物待处理',
+            subtitle:(RoomSvc.LOST_DECISIONS[x.decision]||'')+(x.decisionNote?' · '+x.decisionNote:''),
+            route:'lost-records',createdAt:x.decisionAt||0});
+        });
+      }
+
       /* “我的工作”先保证本人已经在执行/需要立即续做的事项不被新来的普通待接任务挤出首屏。
        * 同一状态组内再按业务优先级和产生时间排序；异常仍突出，但普通待接不得压住进行中工作。 */
-      var rank = { doing: 0, paused: 1, alert: 2, confirm: 3, temporary: 4, waiting: 5 };
+      function workRank(w) {
+        if(w.statusGroup==='doing'||w.statusGroup==='paused')return 0;
+        if(w.statusGroup==='alert')return 4;
+        if(w.priority==='urgent'||w.priority==='high')return 1;
+        if(w.statusGroup==='temporary')return 2;
+        if(w.createdAt && Date.now()-w.createdAt<30*60000 && w.statusGroup==='waiting')return 2;
+        return 3;
+      }
       return out.sort(function (a, b) {
         /* 进行中/待继续永远先于普通共享待接；共享任务不能用 -1 抢占首页首位。 */
-        var ar = Object.prototype.hasOwnProperty.call(rank, a.statusGroup) ? rank[a.statusGroup] : 9;
-        var br = Object.prototype.hasOwnProperty.call(rank, b.statusGroup) ? rank[b.statusGroup] : 9;
+        var ar = workRank(a), br = workRank(b);
         if (ar !== br) return ar - br;
         var prio = ((b.priority === 'urgent' ? 3 : b.priority === 'high' ? 2 : 1) - (a.priority === 'urgent' ? 3 : a.priority === 'high' ? 2 : 1));
         if (prio) return prio;
@@ -11662,7 +11713,6 @@ window.Engine = (function () {
     boot: boot
   };
 })();
-
 </script>
 <script>
 /* ==========================================================================
@@ -13121,8 +13171,8 @@ window.OpsFlow = (function () {
     if (!me) return fail('只有具备客房现场作业权限的员工可反馈现场核实');
     if (!t || t.type !== 'room_site_check' || !AuthContext.inScope(t)) return fail('核实任务不存在');
     if (t.status === 'done') return { ok: true, repeat: true, task: t };
-    if (t.status !== 'doing' || t.assigneeId !== me.id || t.claimBy !== me.id)
-      return fail('请由本人当班接单后提交现场核实结果');
+    if (t.status !== 'pending' && !(t.status==='doing' && t.assigneeId===me.id && t.claimBy===me.id))
+      return fail('该现场核查已由其他人员处理或不可提交');
     if (typeof Presence !== 'undefined' && !Presence.isWorking(me.id))
       return fail('当前非当班，不能提交现场核实');
     if (!PRESENCE[o.presence]) return fail('请选择现场人员情况');
@@ -13138,12 +13188,28 @@ window.OpsFlow = (function () {
       ({yes:'有',no:'无',unknown:'无法确认'}[result.baggage]) + '；房卡：' +
       ({yes:'有',no:'无',unknown:'无法确认'}[result.roomCard]);
     if (result.note) details += '；' + result.note;
+    /* 现场核实仅一次提交，后台原子接手并完成；不让客房先点一次“接单”。 */
+    if(t.status==='pending') {
+      var claimed=Pool.claim(t.id,me.id);
+      if(!claimed||!claimed.ok)return claimed||fail('核查提交失败');
+    }
     var completed = Engine.Task.finish(t.id, details);
     if (!completed || !completed.ok) return completed || fail('现场核实任务未能完成');
-    DB.update('tasks', taskId, { siteResult: result });
+    DB.update('tasks', taskId, { siteResult: result,
+      siteFeedbackState:'unread',siteFeedbackAt:Date.now(),siteFeedbackSeenAt:0 });
     RoomSvc.tl(t.roomId, 'site_check', '现场核实：' + details,
       { refType: 'task', refId: taskId });
+    if(t.creatorId)Engine.notify(t.creatorId,{type:'task',title:DB.roomNo(t.roomId)+' 房核查结果待查看',
+      content:details,refType:'task',refId:taskId});
     return { ok: true, task: DB.byId('tasks', taskId) };
+  }
+  function siteFeedbackSeen(taskId) {
+    var me=actor('frontdesk'),t=DB.byId('tasks',taskId);
+    if(!me||!t||!AuthContext.inScope(t)||t.type!=='room_site_check'||!t.siteResult)
+      return fail('无权查看该查房反馈');
+    if(t.creatorId!==me.id&&!Policy.isSupervisor(me))return fail('该反馈不属于本人');
+    if(t.siteFeedbackState==='unread')DB.update('tasks',taskId,{siteFeedbackState:'read',siteFeedbackSeenAt:Date.now()});
+    return {ok:true,task:DB.byId('tasks',taskId)};
   }
   function hourlyExtend(o) {
     o = o || {};
@@ -13351,7 +13417,7 @@ window.OpsFlow = (function () {
       handovers:DB.find('handovers',function(h){return AuthContext.inScope(h)&&U.ymd(h.createdAt)===date;}).length };
   }
   return { PURPOSES:PURPOSES,PRESENCE:PRESENCE,
-    siteCreate:siteCreate,siteFinish:siteFinish,siteOpen:siteOpen,hourlyExtend:hourlyExtend,repairCreate:repairCreate,
+    siteCreate:siteCreate,siteFinish:siteFinish,siteFeedbackSeen:siteFeedbackSeen,siteOpen:siteOpen,hourlyExtend:hourlyExtend,repairCreate:repairCreate,
     loanCreate:loanCreate,loanReturn:loanReturn,outstanding:outstanding,roomHints:roomHints,
     dailyCleaning:dailyCleaning,dailyEngineering:dailyEngineering,dailyFront:dailyFront };
 })();
@@ -15064,15 +15130,26 @@ function homeStaff(me) {
   /* 同一张待清扫任务已经在“可作业客房”展示时，不在“我的工作”重复出现；
    * 扫码真正开始后 availableWork 会自动移除，此时任务再进入“我的工作”的进行中视图。 */
   myWork = myWork.filter(function (w) { return !(w.refType === 'task' && hkAvailableTaskIds[w.refId]); });
-  /* Engine.MyWork 已按“进行中/待继续优先，其次异常/确认，普通待接最后”排序。
-   * 首页不得再按创建时间覆盖该顺序，否则正在执行的工作会被新待接事项挤出首屏。 */
+  function workOrderRank(w) {
+    if(w.statusGroup==='doing'||w.statusGroup==='paused')return 0;
+    if(w.statusGroup==='alert')return 4;
+    if(w.priority==='urgent'||w.priority==='high')return 1;
+    if(w.statusGroup==='temporary')return 2;
+    if(w.createdAt && Date.now()-w.createdAt<30*60000 && w.statusGroup==='waiting')return 2;
+    if(w.statusGroup==='confirm'||w.statusGroup==='waiting')return 3;
+    return 3;
+  }
+  myWork.sort(function(a,b) {
+    var x=workOrderRank(a),y=workOrderRank(b);
+    return x-y || (b.createdAt||0)-(a.createdAt||0);
+  });
 
   /* ---- V1.1 统一“我的工作” ---- */
   html += '<div class="card"><div class="card-head"><div class="card-title">我的工作'
     + (myWork.length ? ' <span class="chip chip-blue">' + myWork.length + '</span>' : '') + '</div>'
     + '<div class="card-more" data-act="tab" data-k="tasks">任务工作台 ›</div></div>';
   if (myWork.length) {
-    html += myWork.slice(0, 6).map(function (w) {
+    html += myWork.slice(0, 5).map(function (w) {
       var chip = w.statusGroup === 'alert' ? '<span class="chip chip-red">异常/超时</span>'
         : w.statusGroup === 'paused'
           ? ((w.subtitle || '').indexOf('维修已完成') >= 0
@@ -15082,31 +15159,17 @@ function homeStaff(me) {
         : w.statusGroup === 'confirm' ? '<span class="chip chip-orange">待确认/验收</span>'
         : w.statusGroup === 'temporary' ? '<span class="chip">临时任务</span>'
         : '<span class="chip">待接收</span>';
-      return '<div class="li" data-act="mywork-open" data-route="' + U.esc(w.route || '') + '">'
+      return '<div class="li" data-act="'+(w.refType==='site-feedback'?'site-feedback-read':'mywork-open')+'"'
+        +(w.refType==='site-feedback'?' data-id="'+U.esc(w.refId)+'"':'')
+        +' data-route="' + U.esc(w.route || '') + '">'
         + '<div class="grow"><div class="t-md t-w6">' + U.esc(w.title) + ' ' + chip + '</div>'
         + '<div class="t-xs c3 mt8">' + U.esc(w.subtitle || '') + '</div></div><div class="li-arrow">›</div></div>';
     }).join('');
   } else {
     html += Comp.empty('当前没有需要你处理的工作', '✅');
   }
+  if(myWork.length>5)html+='<div class="t-sm c2 mt8" data-act="tab" data-k="tasks">另有 '+(myWork.length-5)+' 项，查看全部 ›</div>';
   html += '</div>';
-
-  /* 遗留物不生成第二份工单：只有前厅待决事项和本人收到的反馈露出。 */
-  if (typeof RoomSvc !== 'undefined' && RoomSvc.lostItemsForRole) {
-    var lostRows=RoomSvc.lostItemsForRole();
-    var frontLost=Policy.can(me,'frontdesk');
-    var unreadLost=frontLost
-      ? lostRows.filter(function(x){return !x.decision;})
-      : lostRows.filter(function(x){return !!x.decision;});
-    if (unreadLost.length) {
-      html+='<div class="card"><div class="row-b"><div class="grow"><div class="t-md t-w6">'
-        +(frontLost?'遗留物待处理':'前厅遗留物反馈')+' · '+unreadLost.length+' 条</div>'
-        +'<div class="t-sm c2 mt8">'+U.esc(DB.roomNo(unreadLost[0].roomId))+' 房 · '
-        +U.esc(frontLost?unreadLost[0].note:
-          (RoomSvc.LOST_DECISIONS[unreadLost[0].decision]||''))+'</div></div>'
-        +'<div class="btn btn-ghost btn-sm" data-act="go-lost-records">查看</div></div></div>';
-    }
-  }
 
   /* ---- 核心入口优先；其余能力保留清晰的二级入口，不截断丢失。 ---- */
 
@@ -15591,7 +15654,7 @@ App.page('tasks', {
           : w.statusGroup === 'confirm' ? '<span class="chip chip-orange">待确认/验收</span>'
           : w.statusGroup === 'temporary' ? '<span class="chip">临时任务</span>'
           : '<span class="chip">待接收</span>';
-        return '<div class="li" data-act="task-mywork-open" data-route="' + U.esc(w.route || '') + '">'
+        return '<div class="li" data-act="task-mywork-open" data-kind="'+U.esc(w.kind||'')+'" data-id="'+U.esc(w.refId||'')+'" data-route="' + U.esc(w.route || '') + '">'
           + '<div class="grow"><div class="t-md t-w6">' + U.esc(w.title) + ' ' + chip + '</div>'
           + '<div class="t-xs c3 mt8">' + U.esc(w.subtitle || '') + '</div></div><div class="li-arrow">›</div></div>';
       }).join('') + '</div>' : Comp.empty(statusFilter === 'checking' ? '暂无待确认/验收事项' : '当前没有需要处理的工作', '✅');
@@ -15645,8 +15708,13 @@ App.page('tasks', {
 });
 
 App.act('task-mywork-open', function (el) {
-  var route = el.getAttribute('data-route');
-  if (route) App.go(route);
+  var route=el.getAttribute('data-route'),kind=el.getAttribute('data-kind');
+  if(kind==='site-feedback'){
+    var r=OpsFlow.siteFeedbackSeen(el.getAttribute('data-id'));
+    if(!r||!r.ok)return U.toast((r&&r.reason)||'反馈不可查看');
+    DB.flush();
+  }
+  if(route)App.go(route);
 });
 
 App.act('task-tab', function (el) {
@@ -15715,10 +15783,6 @@ App.page('task', {
     if (isSiteCheckTask) {
       var reasons=(t.siteReasons||[t.sitePurpose]).filter(function(k){return !!OpsFlow.PURPOSES[k];});
       var site=t.siteResult;
-      var activeOther=DB.findOne('tasks',function(x){
-        return x.id!==t.id && AuthContext.inScope(x) && x.type==='room_site_check'
-          && x.claimBy===me.id && x.status==='doing';
-      });
       var siteHtml='<div class="card mt12"><div class="t-lg t-w6">'+U.esc(DB.roomNo(t.roomId))+' 房</div>'
         +'<div class="t-sm t-w6 mt12">核查内容</div>'
         +'<div class="wrap mt8">'+reasons.map(function(k){
@@ -15729,11 +15793,9 @@ App.page('task', {
           +' · 行李'+U.esc(({yes:'有',no:'无',unknown:'未确认'})[site.baggage]||'')
           +' · 房卡'+U.esc(({yes:'有',no:'无',unknown:'未确认'})[site.roomCard]||'')+'</div>'
           +(site.note?'<div class="t-sm c2 mt8">'+U.esc(site.note)+'</div>':''):'')
-        +(!site && t.status==='pending' && !t.assigneeId && canClaimPool
-          ?(activeOther?'<div class="notice mt12">先完成 '+U.esc(DB.roomNo(activeOther.roomId))+' 房核查</div>'
-            :'<button class="btn btn-primary btn-block btn-lg mt16" data-act="task-accept" data-id="'+t.id+'">接单</button>'):'')
-        +(!site && t.status==='doing' && isAssignee
-          ?'<button class="btn btn-primary btn-block btn-lg mt16" data-act="site-result-open" data-id="'+t.id+'">登记核查结果</button>':'')
+        +(!site && (t.status==='pending' || (t.status==='doing'&&isAssignee))
+          && isOnDuty && Policy.can(me,'clean')
+          ?'<button class="btn btn-primary btn-block btn-lg mt16" data-act="site-result-open" data-id="'+t.id+'">填写并提交核查结果</button>':'')
         +'</div>';
       return siteHtml;
     }
@@ -16295,9 +16357,14 @@ function woRow(w) {
 }
 /* 现场核查直接点选；未点选不预设客人是否在房，杜绝误报。 */
 var _sitePick={};
+App.act('site-feedback-read',function(el){
+  var r=OpsFlow.siteFeedbackSeen(el.getAttribute('data-id'));
+  if(!r||!r.ok)return U.toast((r&&r.reason)||'反馈不可查看');
+  DB.flush();App.go('task/'+el.getAttribute('data-id'));App.refresh();
+});
 App.act('site-result-open',function(el){
   var id=el.getAttribute('data-id'),t=DB.byId('tasks',id);
-  if(!t||t.type!=='room_site_check')return;
+  if(!t||t.type!=='room_site_check'||!['pending','doing'].includes(t.status))return;
   _sitePick={};
   function choices(field,rows) {
     return '<div class="opt-grid mt8">'+rows.map(function(x){
@@ -24221,25 +24288,32 @@ App.act('gq-transfer-save', function (el) {
     DB.flush();U.toast('已通知当班客房');App.go('home');
   });
 
+  var selectedRepairType='ac';
   App.page('front-repair', {
     title:'发起工程工单',
     render:function(){
       if(!allowed())return Comp.empty('没有前厅报修权限','🔒');
       if(!keyRepair)keyRepair=U.uid('repair-submit');
-      var types=(DICT.issueTypes||[]).filter(function(t){return t.repair;});
+      var types=[['ac','空调'],['light','照明'],['eng_other','其他']];
       return '<div class="card mt12"><div class="t-sm t-w6">房间（公共区域可留空）</div>'
         + roomField('front-repair-room',false)
         + '<div class="t-sm t-w6 mt12">公共区域（无房号时填）</div>'
         + '<input class="inp mt8" id="front-repair-area" placeholder="例如：大堂/走廊/厨房">'
         + '<div class="t-sm t-w6 mt12">故障类别</div>'
-        + '<select class="inp mt8" id="front-repair-type">'+types.map(function(t){
-          return '<option value="'+t.key+'">'+U.esc(t.name)+'</option>';
-        }).join('')+'</select>'
+        + '<div class="opt-grid mt8">'+types.map(function(t){
+          return '<div class="opt'+(selectedRepairType===t[0]?' on':'')+'" data-act="front-repair-choice" data-k="'+t[0]+'" role="button">'+t[1]+'</div>';
+        }).join('')+'</div>'
         + '<div class="t-sm t-w6 mt12">故障描述</div><textarea class="inp mt8" id="front-repair-note" rows="3" placeholder="请描述真实故障，避免仅写“坏了”"></textarea>'
         + '<button class="btn btn-primary btn-block mt16" data-act="front-repair-send">发送工程工单</button></div>';
     }
   });
-  App.act('go-front-repair',function(){App.go('front-repair');});
+  App.act('go-front-repair',function(){selectedRepairType='ac';App.go('front-repair');});
+  App.act('front-repair-choice',function(el){
+    selectedRepairType=el.getAttribute('data-k');
+    Array.prototype.forEach.call(document.querySelectorAll('[data-act="front-repair-choice"]'),function(x){
+      x.classList.toggle('on',x.getAttribute('data-k')===selectedRepairType);
+    });
+  });
   App.act('front-repair-send',function(){
     if(repairBusy)return U.toast('正在提交，请勿重复点击');
     var no=(document.getElementById('front-repair-room')||{}).value||'';
@@ -24248,7 +24322,7 @@ App.act('gq-transfer-save', function (el) {
     repairBusy=true;
     var res=OpsFlow.repairCreate({
       roomId:room?room.id:'', area:(document.getElementById('front-repair-area')||{}).value,
-      issueType:(document.getElementById('front-repair-type')||{}).value,
+      issueType:selectedRepairType,
       note:(document.getElementById('front-repair-note')||{}).value,
       clientKey:keyRepair
     });
@@ -24333,22 +24407,26 @@ App.act('gq-transfer-save', function (el) {
       var records=RoomSvc.lostItemsForRole();
       if(!front&&!Policy.can(me,'clean'))return Comp.empty('当前没有访问权限','🔒');
       if(!records.length)return Comp.empty('暂无遗留物记录','✅');
-      var waiting=records.filter(function(x){return !x.decision;});
+      var waiting=records.filter(function(x){return x.status!=='done'&&!x.decision;});
       var other=records.filter(function(x){return !!x.decision;});
       function card(item) {
         var room=DB.roomNo(item.roomId),reply=item.decision&&RoomSvc.LOST_DECISIONS[item.decision];
         var task=item.taskId&&DB.byId('tasks',item.taskId);
         var claimed=!!task&&task.claimBy===Engine.Session.user().id&&task.status==='doing';
+        var needsExecution=!front&&item.reporterId===me.id&&item.status==='instructed';
         return '<div class="card"><div class="row-b"><div class="t-md t-w6">'
           +U.esc(room)+' 房 · '+U.esc(item.note)+'</div>'
-          +'<span class="chip '+(reply?'chip-blue':'chip-orange')+'">'+(reply?'已反馈':'待前厅处理')+'</span></div>'
+          +'<span class="chip '+(item.status==='done'?'chip-green':reply?'chip-blue':'chip-orange')+'">'
+          +(item.status==='done'?'已处理':reply?'待客房执行':'待前厅回复')+'</span></div>'
           +(item.photos&&item.photos.length?Comp.photos(item.photos):'')
           +(reply?'<div class="t-md mt12">前厅反馈：'+U.esc(reply)+(item.decisionNote?' · '+U.esc(item.decisionNote):'')+'</div>':'')
           +(front&&!reply&&task&&task.status==='pending'
             ?'<button class="btn btn-primary btn-block mt12" data-act="lost-claim" data-id="'+item.id+'">接单处理</button>':'')
-          +(front&&(!task||claimed||reply)
+          +(front&&item.status!=='done'&&(!task||claimed||reply)
             ?'<button class="btn btn-primary btn-block mt12" data-act="lost-decision-open" data-id="'+item.id+'">'
-            +(reply?'更新处理反馈':'选择处理方式')+'</button>':'')+'</div>';
+            +(reply?'修改处理意见':'回复客房处理意见')+'</button>':'')
+          +(needsExecution?'<button class="btn btn-primary btn-block mt12" data-act="lost-execute-open" data-id="'+item.id+'">执行并反馈结果</button>':'')
+          +(item.status==='done'?'<div class="t-sm c2 mt8">客房处理结果：'+U.esc(item.executedNote||'')+'</div>':'')+'</div>';
       }
       return (waiting.length?waiting.map(card).join(''):'')
         +(other.length?other.slice(0,20).map(card).join(''):'');
@@ -24361,6 +24439,22 @@ App.act('gq-transfer-save', function (el) {
     DB.flush();U.toast('已接单');App.refresh();
   });
 
+  App.act('lost-execute-open',function(el){
+    var item=DB.byId('lostItems',el.getAttribute('data-id')),me=Engine.Session.user();
+    if(!item||item.reporterId!==me.id||item.status!=='instructed')return;
+    App.sheet({title:DB.roomNo(item.roomId)+' 房 · 处理遗留物',
+      body:'<div class="pad" style="padding:8px 18px">'
+        +'<div class="t-md t-w6">前厅要求：'+U.esc(RoomSvc.LOST_DECISIONS[item.decision]||'')+'</div>'
+        +(item.decisionNote?'<div class="t-md mt8">'+U.esc(item.decisionNote)+'</div>':'')
+        +'<textarea class="inp mt12" rows="2" id="lost-executed-note" placeholder="实际处理结果，例如：已送交前厅保管"></textarea></div>',
+      foot:'<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+        +'<button class="btn btn-primary grow" data-act="lost-execute-send" data-id="'+item.id+'">确认已处理并反馈</button>'});
+  });
+  App.act('lost-execute-send',function(el){
+    var r=RoomSvc.lostExecute(el.getAttribute('data-id'),(document.getElementById('lost-executed-note')||{}).value);
+    if(!r||!r.ok)return U.toast((r&&r.reason)||'反馈失败');
+    DB.flush();App.closeSheet();U.toast('已反馈前厅');App.refresh();
+  });
   var _lostDecision='';
   App.act('lost-decision-open',function(el){
     var item=DB.byId('lostItems',el.getAttribute('data-id'));
