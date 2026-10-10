@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>云栖酒店 · 人工验收测试版</title>
+<title>云栖酒店 · OPS66 人工验收 · 早餐双模式</title>
 <style>
 /* ==========================================================================
    云栖酒店 · 运营管理系统  基础样式
@@ -523,6 +523,7 @@ textarea.inp{text-align:left;resize:none;min-height:64px;line-height:1.6}
 .acceptance-bar{position:fixed;z-index:9999;top:10px;left:10px;right:10px;max-width:920px;margin:auto;padding:10px 14px;background:#fff4cc;border:2px solid #d99b00;border-radius:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;font:14px/1.4 sans-serif;box-shadow:0 4px 18px #0003}.acceptance-bar span{display:block;font-size:12px;color:#725b20}.acceptance-bar select{font-size:14px;padding:7px;border:1px solid #b98700;border-radius:6px;background:white}@media(max-width:600px){.acceptance-bar{position:relative;top:auto;left:auto;right:auto;border-radius:0;flex-direction:column;align-items:stretch}}
 </style>
 <meta name="hotelops-source-sha" content="96f7171412cb15c73c47d6a004f778c0c35bc903">
+<meta name="hotelops-source-sha" content="5f886cc55a7905faf30b51ffc9bc93e8808f7798">
 </head>
 <body><div id="acceptance-fatal" style="display:none;position:fixed;z-index:10002;left:12px;right:12px;top:12px;background:#7d1d1d;color:#fff;padding:12px;border-radius:8px;font:13px/1.5 sans-serif;white-space:pre-wrap"></div><script>window.addEventListener("error",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版启动错误：\n"+(e.message||"未知错误")+"\n"+(e.filename||"")+" : "+(e.lineno||"");}});window.addEventListener("unhandledrejection",function(e){var x=document.getElementById("acceptance-fatal");if(x){x.style.display="block";x.textContent="验收版异步错误：\n"+String(e.reason&&e.reason.message||e.reason||"未知错误");}});</script><div id="acceptance-version" style="display:none;pointer-events:none;background:#172033;color:#fff;padding:6px 9px;border-radius:7px;font:12px/1.2 sans-serif;opacity:.88">验收版：2026-10-10 10:24 · 候选版本 [96f7171412cb]</div>
 
@@ -797,8 +798,7 @@ window.U = (function () {
   };
 })();
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/db.js —— 数据访问层
  * 内存对象 + localStorage 持久化；对上层只暴露表级 CRUD，屏蔽存储细节
  * 表结构对应需求文档第十九节「核心数据库设计」
@@ -843,7 +843,7 @@ window.DB = (function () {
      */
     'settings', 'storeCapabilities', 'profiles', 'workSessions', 'taskClaims',
     'roomClean', 'roomInsp', 'roomIssues', 'roomPrio', 'roomReview', 'roomEvents',
-    'breakfastDays', 'breakfastForecasts', 'purQuotes',
+    'breakfastDays', 'breakfastForecasts', 'breakfastPurchases', 'breakfastChecks', 'purQuotes',
     'externalConn', 'auditLog',
     /* DEV-001：平台支持访问与紧急访问是独立、限时、可回收的安全上下文 */
     'supportSessions', 'breakGlassSessions',
@@ -1346,7 +1346,6 @@ window.DB = (function () {
     room: room, roomNo: roomNo
   };
 })();
-
 </script>
 <script>
 /* ==========================================================================
@@ -2344,8 +2343,7 @@ window.Seed = (function () {
 })();
 </script>
 <!-- V4：能力化权限 / 工作状态 / 部门任务池 / 客房作业 / 住客早餐 -->
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/policy.js —— 策略中心（V4 新增）
  * ---------------------------------------------------------------------------
  * 定位：把「谁能做什么、看到什么、是否需要接收任务」这些本店制度，
@@ -2383,6 +2381,7 @@ window.Policy = (function () {
     { key: 'purchase_order', name: '采购下单', desc: '确认价格后向供应商正式下单' },
     { key: 'breakfast_forecast', name: '住客早餐预计', desc: '前厅报/改住客早餐预计人数' },
     { key: 'breakfast_actual', name: '住客早餐实际', desc: '餐厅录入住客早餐实际人数并上传剩余食品照片' },
+    { key: 'breakfast_check', name: '早餐现场核验', desc: '当班核验含早房号、实到人数和现场购买信息；可临时授权跨部门员工' },
     { key: 'meal_actual', name: '员工餐实际人数', desc: '餐厅收尾统计员工餐实际用餐人数' },
     { key: 'arrange_team_meal', name: '安排团餐', desc: '投资人/店长/授权销售可安排团餐' },
     /* ---- V4.3.1 新增（§3.2 / §11.1 / §13） ---- */
@@ -2436,7 +2435,7 @@ window.Policy = (function () {
        * V4.3.1 §2.1：店长是门店最高经营管理员，采购、验收、供应商、价格、周期任务均可由其掌控 */
       gm: ['manage_org', 'approve_purchase', 'view_stats', 'view_cost', 'decision', 'manage_space', 'manage_supplier',
         'purchase_order', 'purchase_food', 'purchase_eng', 'accept_food', 'accept_eng', 'manage_material',
-        'breakfast_actual', 'meal_actual', 'arrange_team_meal', 'manage_recurring_task', 'manage_item_price'],
+        'breakfast_actual', 'breakfast_check', 'meal_actual', 'arrange_team_meal', 'manage_recurring_task', 'manage_item_price'],
       finance: ['finance', 'approve_purchase', 'view_stats', 'view_cost', 'manage_item_price'],
       /* 采购岗职责含「询价、下单、验收」（V4.2 §6.3 验收权限可另行指定到人） */
       purchase: ['approve_purchase', 'purchase_food', 'purchase_eng', 'purchase_order',
@@ -2462,7 +2461,7 @@ window.Policy = (function () {
       '工程主管': ['maintain', 'purchase_eng', 'accept_eng'],
       '厨师': ['catering', 'catering_ack'],
       '厨师长': ['purchase_food', 'catering', 'catering_ack'],
-      '厨工': ['catering', 'breakfast_actual', 'meal_actual', 'team_meal_close'],
+      '厨工': ['catering', 'breakfast_check', 'breakfast_actual', 'meal_actual', 'team_meal_close'],
       '餐厅经理': ['catering', 'accept_food'],
       '财务主管': ['finance', 'inspect', 'manage_item_price'],
       '店长助理': ['manage_org'],
@@ -2541,6 +2540,15 @@ window.Policy = (function () {
     }
     var legacyChanged = stripLegacyCost(s.v.roleCaps.manager);
     if (stripLegacyCost(s.v.deptCaps.d_pur)) legacyChanged = true;
+    /* 早餐现场核验归厨工岗位，而非餐厅部所有员工；清理旧版本下发到部门的过宽授权。 */
+    if (Array.isArray(s.v.deptCaps.d_fb) && s.v.deptCaps.d_fb.indexOf('breakfast_check') >= 0) {
+      s.v.deptCaps.d_fb = s.v.deptCaps.d_fb.filter(function (k) { return k !== 'breakfast_check'; });
+      legacyChanged = true;
+    }
+    if (Array.isArray(s.v.postCaps['厨工']) && s.v.postCaps['厨工'].indexOf('breakfast_check') < 0) {
+      s.v.postCaps['厨工'].push('breakfast_check');
+      legacyChanged = true;
+    }
     if (deepChanged || legacyChanged) DB.update('settings', KEY, { v: s.v });
     return s.v;
   }
@@ -2680,7 +2688,7 @@ window.Policy = (function () {
       return fail('该能力不可通过个人特殊授权授予');
     /* 其它现场动作尚未统一采用按业务对象范围校验，禁止先通过通用 Policy.can 越范围。
        当前只启用已在服务层校验授权部门的周期模板管理。 */
-    if (capability !== 'manage_recurring_task')
+    if (capability !== 'manage_recurring_task' && capability !== 'breakfast_check')
       return fail('该特殊能力尚未接入范围守卫，暂不能授权');
     var scoped = AuthContext.checkScope(target);
     if (!scoped.ok || !AuthContext.checkScope(me).ok) return fail('不可跨酒店或租户授权');
@@ -2692,9 +2700,14 @@ window.Policy = (function () {
     })) return fail('授权部门范围无效');
     var until = Number(options.validUntil) || 0, from = Number(options.validFrom) || Date.now();
     if (until && until <= from) return fail('失效时间必须晚于生效时间');
+    if (capability === 'breakfast_check') {
+      if (ids.indexOf('d_fb') < 0) return fail('早餐现场核验只允许授权餐厅现场工作范围');
+      if (!until || until - from > 48 * 3600000)
+        return fail('早餐临时授权必须设置生效/失效时间且最长48小时');
+    }
     var g = DB.insert('capabilityGrants', AuthContext.stamp({
       id: U.uid('cg'), userId: userId, capability: capability,
-      scope: { deptIds: ids.slice() }, actions: ['manage'], validFrom: from, validUntil: until,
+      scope: { deptIds: ids.slice() }, actions: capability === 'breakfast_check' ? ['read','record'] : ['manage'], validFrom: from, validUntil: until,
       grantedBy: me.id, grantedAt: Date.now(), revokedBy: null, revokedAt: null, version: 1
     }));
     Engine.Audit.write({targetType:'capabilityGrant',targetId:g.id,targetName:target.name,
@@ -2968,7 +2981,6 @@ window.Policy = (function () {
     rule: function (k) { return cfg().rules[k]; }
   };
 })();
-
 </script>
 <script>
 /* ==========================================================================
@@ -3133,8 +3145,7 @@ window.Presence = (function () {
 })();
 
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/pool.js —— 部门任务池 / 接手锁 / 释放转交（V4 §7 新增）
  * ---------------------------------------------------------------------------
  * 场景：换房复核、客人临时服务、突发工程问题等临时事务，
@@ -3354,10 +3365,8 @@ window.Pool = (function () {
     transfer: transfer, reclaim: reclaim, created: created
   };
 })();
-
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/room.js —— 客房作业中心（V4 §8 / §9 / §10 / §11 / §12 新增）
  * ---------------------------------------------------------------------------
  * 一条真实的客房作业链：
@@ -3662,11 +3671,21 @@ window.RoomSvc = (function () {
         x.sourceType === sourceType && x.sourceId === sourceId && x.note === note;
     });
     if (existing) return { ok: true, repeat: true, item: existing };
+    /* 同一物品由客房正式派发给前厅的一张工单，附照片；保留原房间和清扫记录。 */
+    var issued = Pool.publish({
+      type:'lost_item_handoff',source:'客房清扫发现遗留物',
+      title:room.number+' 房 · 遗留物处理',desc:note,
+      roomId:room.id,deptId:'d_fo',cap:'frontdesk',
+      location:room.number+' 房',creatorId:me.id,
+      dueMin:60,clientKey:'lost:'+sourceId+':'+note,
+      photos:photos.slice()
+    });
+    if(!issued||!issued.ok)return issued||{ok:false,reason:'遗留物工单创建失败'};
     var item = DB.insert('lostItems', AuthContext.stamp({
       id: U.uid('lost'), roomId: room.id, cleanId: sourceType === 'roomClean' ? sourceId : '',
       sourceType: sourceType, sourceId: sourceId,
       reporterId: me.id, reporter: me.name, note: note, photos: photos.slice(),
-      status: 'reported', createdAt: Date.now()
+      taskId:issued.task.id,status: 'reported', createdAt: Date.now()
     }));
     tl(room.id, 'lost', me.name + ' 记录发现物品：' + note,
       { refType: 'lostItem', refId: item.id });
@@ -3706,16 +3725,34 @@ window.RoomSvc = (function () {
       return AuthContext.inScope(x) && (front || x.reporterId===me.id);
     }).sort(function(a,b){return (b.createdAt||0)-(a.createdAt||0);});
   }
+  function lostClaim(itemId) {
+    var me=Engine.Session.me;
+    if(!me||!Policy.can(me,'frontdesk'))return {ok:false,reason:'仅前厅可以接手遗留物工单'};
+    var item=DB.byId('lostItems',itemId);
+    if(!item||!AuthContext.inScope(item)||!item.taskId)return {ok:false,reason:'找不到对应遗留物工单'};
+    return Pool.claim(item.taskId,me.id);
+  }
   function lostDecide(itemId,decision,note) {
     var me=Engine.Session.me;
-    if(!me||!Policy.can(me,'frontdesk'))return {ok:false,reason:'只有前厅可反馈遗留物处理方式'};
+    if(!me||!Policy.can(me,'frontdesk'))return {ok:false,reason:'只有前厅可处理遗留物工单'};
     var item=DB.byId('lostItems',itemId);
     if(!item||!AuthContext.inScope(item))return {ok:false,reason:'遗留物记录不存在'};
     if(!LOST_DECISIONS[decision])return {ok:false,reason:'请选择处理方式'};
     note=String(note||'').trim().slice(0,300);
     if(decision==='other'&&!note)return {ok:false,reason:'请填写具体处理方式'};
+    var task=item.taskId&&DB.byId('tasks',item.taskId);
+    if(!task||!AuthContext.inScope(task)||task.type!=='lost_item_handoff')
+      return {ok:false,reason:'原遗留物工单不存在'};
     var old=item.decision||'';
-    if(old===decision&&(item.decisionNote||'')===note)return {ok:true,repeat:true,item:item};
+    if(old===decision&&(item.decisionNote||'')===note && task.status==='done')
+      return {ok:true,repeat:true,item:item};
+    if(task.status!=='done' && (task.status!=='doing'||task.claimBy!==me.id||task.assigneeId!==me.id))
+      return {ok:false,reason:'请先接手该遗留物工单'};
+    if(task.status!=='done') {
+      var result=Engine.Task.finish(task.id,
+        '前厅反馈：'+LOST_DECISIONS[decision]+(note?'；'+note:''));
+      if(!result||!result.ok)return result||{ok:false,reason:'工单未能完成'};
+    }
     var now=Date.now(),hist=(item.decisionHistory||[]).slice();
     hist.push({decision:decision,note:note,by:me.id,at:now});
     DB.update('lostItems',itemId,{
@@ -3734,7 +3771,7 @@ window.RoomSvc = (function () {
         content:LOST_DECISIONS[decision]+(note?'：'+note:''),
         refType:'lostItem',refId:itemId});
     });
-    return {ok:true,item:DB.byId('lostItems',itemId)};
+    return {ok:true,item:DB.byId('lostItems',itemId),task:DB.byId('tasks',task.id)};
   }
 
   /** 清扫专用入口只负责验证在执行的原清扫，复用统一登记记录。 */
@@ -4830,7 +4867,7 @@ window.RoomSvc = (function () {
     byToken: byToken, byNumber: byNumber, state: state, timeline: timeline, tl: tl,
     scanActions: scanActions,
     cleanStart: cleanStart, cleanPause: cleanPause, cleanResume: cleanResume, cleanWaitRepair: cleanWaitRepair, repairResolved: repairResolved, cleanFinish: cleanFinish, reportLostItem: reportLostItem, recordLostItem: recordLostItem,
-    lostDecide: lostDecide, lostItemsForRole: lostItemsForRole, LOST_DECISIONS: LOST_DECISIONS,
+    lostClaim: lostClaim, lostDecide: lostDecide, lostItemsForRole: lostItemsForRole, LOST_DECISIONS: LOST_DECISIONS,
     transferClean: transferClean,
     openClean: openClean, cleanToday: cleanToday, lastClean: lastClean,
     inspStart: inspStart, inspFinish: inspFinish, transferInspection: transferInspection, recheckStart: recheckStart, rectifyDone: rectifyDone,
@@ -4845,10 +4882,8 @@ window.RoomSvc = (function () {
     tempClean: tempClean, inspectPool: inspectPool, ensureInspectionTask: ensureInspectionTask
   };
 })();
-
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/breakfast.js —— 住客早餐预计 / 实际人数（V4 §15 新增，独立模块）
  * ---------------------------------------------------------------------------
  * 与「员工餐」彻底分离（§16）：
@@ -4902,6 +4937,20 @@ window.Breakfast = (function () {
       ? PMS.breakfastEntitlements(date)
       : {ok:false,available:false,date:date,rooms:[],total:null,reason:'暂无早餐数据'};
   }
+  /** 每日唯一备餐来源：PMS 有真实早餐权益时优先；否则使用前厅人工预报。
+   * “未接入”和“已接入但同步失败”由 PMS 接入能力区分，不用假人数兜底。
+   */
+  function forecastSource(date) {
+    date=date||U.ymd();
+    var board=pmsBoard(date),manual=day(date,false);
+    if(board.available)return {mode:'pms',date:date,count:board.total,rooms:board.rooms,
+      label:'PMS 自动统计',syncedAt:board.syncedAt||0,manual:manual};
+    var connected=typeof PMS!=='undefined'&&PMS.can&&PMS.can('read.breakfast');
+    return {mode:connected?'fallback':'manual',date:date,
+      count:manual&&manual.firstAt?manual.finalForecast:null,
+      label:connected?'PMS 异常 · 人工预报':'人工预报',
+      rooms:[],manual:manual};
+  }
   function pmsRefHint(date) {
     var board=pmsBoard(date);
     return board.available ? board.total : null;
@@ -4921,10 +4970,11 @@ window.Breakfast = (function () {
     });
     if (d0) return d0;
     var date = o.date || U.ymd();
+    if (pmsBoard(date).available) return Policy.fail('PMS 早餐权益已正常同步，无需人工预报');
     var d = day(date);
     var now = Date.now();
     var cnt = Number(count);
-    if (!cnt && cnt !== 0) return Policy.fail('请填写预计用餐人数');
+    if (!Number.isInteger(cnt) || cnt < 0 || cnt > 9999) return Policy.fail('请填写有效的预计人数');
 
     var isFirst = !d.firstAt;
     var previousForecast = d.finalForecast;
@@ -4962,7 +5012,10 @@ window.Breakfast = (function () {
     });
     if (d0) return d0;
     var d = day(date || U.ymd(Date.now() + 86400000), false);
-    if (!d || !d.firstAt) return Policy.fail('当前没有需要确认的早餐预计');
+    var src=forecastSource(date || U.ymd(Date.now() + 86400000));
+    if(src.count===null)return Policy.fail('当前没有可确认的早餐预计');
+    if (!d && src.mode!=='pms') return Policy.fail('当前没有需要确认的早餐预计');
+    if (!d) d=day(date || U.ymd(Date.now() + 86400000));
     DB.update('breakfastDays', d.id, {
       ackAt: Date.now(), ackBy: me.id, ackByName: me.name, updatedAt: Date.now()
     });
@@ -4981,7 +5034,7 @@ window.Breakfast = (function () {
     var d = day(o.date || U.ymd());
     var cnt = Number(count);
     if (!cnt && cnt !== 0) return Policy.fail('请填写实际用餐人数');
-    if (!d.firstAt) return Policy.fail('前厅尚未报预计人数，请先由前厅报预计');
+    if (forecastSource(o.date || U.ymd()).count===null) return Policy.fail('尚无可用早餐预计人数');
     var photos = (o.photos || []).filter(Boolean);
     if (!photos.length) return Policy.fail('请至少上传 1 张早餐餐后照片');
     DB.update('breakfastDays', d.id, {
@@ -5082,9 +5135,117 @@ window.Breakfast = (function () {
     };
   }
 
+  /* 现场核验和购买记录：按当天当班的早餐现场能力，而非部门或岗位名。 */
+  function canCheck(u) {
+    u=u||Engine.Session.me;
+    return !!u&&Policy.can(u,'breakfast_check')
+      &&Policy.businessEnabled('guest_breakfast',u.hotelId)
+      &&(typeof Presence==='undefined'||Presence.isWorking(u.id));
+  }
+  function checkRows(date) {
+    var me=Engine.Session.me;
+    if(!me||!(Policy.can(me,'breakfast_check')||Policy.can(me,'frontdesk')))return [];
+    return DB.find('breakfastChecks',function(x){
+      return AuthContext.inScope(x)&&(!date||x.date===date);
+    }).sort(function(a,b){return (b.createdAt||0)-(a.createdAt||0);});
+  }
+  function checkIn(o) {
+    o=o||{};
+    var me=Engine.Session.me;
+    if(!canCheck(me))return {ok:false,reason:'请由已授权的当班早餐核验人员操作'};
+    var rn=String(o.roomNo||'').trim(),qty=Number(o.count),date=U.ymd();
+    if(!rn||!Number.isInteger(qty)||qty<1||qty>20)return {ok:false,reason:'请确认房号与实际到餐人数'};
+    var board=pmsBoard(date);
+    if(!board.available)return {ok:false,reason:'PMS 含早数据未同步，暂不能验证含早权益'};
+    var entitlement=board.rooms.filter(function(x){return String(x.roomNo)===rn;})[0];
+    if(!entitlement||!entitlement.count)return {ok:false,reason:'当前房号没有已确认的含早份数'};
+    var key=String(o.clientKey||'').trim();
+    if(key){
+      var same=DB.findOne('breakfastChecks',function(x){return AuthContext.inScope(x)&&x.clientKey===key;});
+      if(same)return {ok:true,repeat:true,record:same};
+    }
+    var used=checkRows(date).filter(function(x){return x.roomNo===rn;}).reduce(function(n,x){return n+x.count;},0);
+    if(used+qty>entitlement.count)return {ok:false,reason:'超过该房剩余含早份数'};
+    var photos=Array.isArray(o.photos)?o.photos.filter(Boolean).slice(0,4):[];
+    if(!photos.length)return {ok:false,reason:'请上传本次用餐现场照片'};
+    var record=DB.insert('breakfastChecks',AuthContext.stamp({
+      id:U.uid('bfc'),date:date,roomNo:rn,count:qty,photos:photos,checkerId:me.id,
+      createdAt:Date.now(),clientKey:key
+    }));
+    return {ok:true,record:record,remaining:entitlement.count-used-qty};
+  }
+  function purchaseRows(date) {
+    var me=Engine.Session.me;
+    if(!me||!(Policy.can(me,'breakfast_check')||Policy.can(me,'frontdesk')))return [];
+    return DB.find('breakfastPurchases',function(x){
+      return AuthContext.inScope(x)&&(!date||x.date===date);
+    }).sort(function(a,b){return (b.createdAt||0)-(a.createdAt||0);});
+  }
+  function purchaseSubmit(o) {
+    o=o||{};
+    var me=Engine.Session.me;
+    if(!canCheck(me))return {ok:false,reason:'只有已授权的当班现场人员可登记早餐购买'};
+    var qty=Number(o.count),type=String(o.type||'').trim();
+    var types={walkin:'现场购买',group:'团购凭证'};
+    var proof=String(o.proof||'').trim().slice(0,120);
+    var photos=(o.photos||[]).filter(Boolean).slice(0,4);
+    if(!types[type]||!Number.isInteger(qty)||qty<1||qty>100)
+      return {ok:false,reason:'请选择购买类型与实际人数'};
+    if(!photos.length)return {ok:false,reason:'请上传购买凭证照片'};
+    var key=String(o.clientKey||'').trim();
+    var existing=key&&DB.findOne('breakfastPurchases',function(x){
+      return AuthContext.inScope(x)&&x.clientKey===key;
+    });
+    if(existing)return {ok:true,repeat:true,record:existing};
+    if(proof){
+      var repeated=DB.findOne('breakfastPurchases',function(x){
+        return AuthContext.inScope(x)&&x.date===U.ymd()&&x.type===type&&x.proof===proof;
+      });
+      if(repeated)return {ok:true,repeat:true,record:repeated};
+    }
+    var record=DB.insert('breakfastPurchases',AuthContext.stamp({
+      id:U.uid('bfp'),date:U.ymd(),type:type,typeName:types[type],
+      count:qty,proof:proof,photos:photos,submittedBy:me.id,
+      createdAt:Date.now(),clientKey:key,status:'pending',
+      postedAt:0,postedBy:'',entryRef:''
+    }));
+    Policy.whoHas('frontdesk').filter(function(u){return AuthContext.inScope(u);})
+      .forEach(function(u){Engine.notify(u.id,{type:'task',title:'早餐购买待入账',
+        content:types[type]+' · '+qty+' 人',refType:'breakfastPurchase',refId:record.id});});
+    return {ok:true,record:record};
+  }
+  function purchasePost(id,entryRef) {
+    var me=Engine.Session.me;
+    if(!me||!Policy.can(me,'frontdesk'))return {ok:false,reason:'只有前厅可以确认入账'};
+    var record=DB.byId('breakfastPurchases',id);
+    if(!record||!AuthContext.inScope(record))return {ok:false,reason:'这条购买记录不可用'};
+    if(record.status==='posted')return {ok:true,repeat:true,record:record};
+    entryRef=String(entryRef||'').trim().slice(0,120);
+    if(!entryRef)return {ok:false,reason:'先在原收银系统入账，并填写真实入账单号'};
+    var duplicate=DB.findOne('breakfastPurchases',function(x){
+      return AuthContext.inScope(x)&&x.id!==id&&x.entryRef===entryRef&&x.status==='posted';
+    });
+    if(duplicate)return {ok:false,reason:'该入账单号已用于另一条购买记录'};
+    DB.update('breakfastPurchases',id,{status:'posted',entryRef:entryRef,
+      postedAt:Date.now(),postedBy:me.id});
+    Engine.notify(record.submittedBy,{type:'info',title:'早餐购买已入账',
+      content:record.typeName+' · '+record.count+' 人',
+      refType:'breakfastPurchase',refId:id});
+    return {ok:true,record:DB.byId('breakfastPurchases',id)};
+  }
+  function purchaseSummary(date) {
+    var rows=purchaseRows(date),used=checkRows(date);
+    var pending=rows.filter(function(x){return x.status==='pending';});
+    return {purchases:rows.reduce(function(n,x){return n+x.count;},0),
+      pending:pending.length,checked:used.reduce(function(n,x){return n+x.count;},0),
+      posted:rows.filter(function(x){return x.status==='posted';}).length};
+  }
+
   return {
     day: day, forecast: forecast, acknowledge: acknowledge, actual: actual, history: history, today: today,
-    stats: stats, diffOf: diffOf, pmsRefHint: pmsRefHint, pmsBoard: pmsBoard,
+    stats: stats, diffOf: diffOf, pmsRefHint: pmsRefHint, pmsBoard: pmsBoard, forecastSource:forecastSource,
+    canCheck:canCheck,checkRows:checkRows,checkIn:checkIn,purchaseRows:purchaseRows,
+    purchaseSubmit:purchaseSubmit,purchasePost:purchasePost,purchaseSummary:purchaseSummary,
     canForecast: function (u) { return canForecast(u || Engine.Session.me); },
     canActual: function (u) { return canActual(u || Engine.Session.me); }
   };
@@ -5356,8 +5517,7 @@ window.TeamMeal = (function () {
     list: list, today: today, board: board, stats: stats, canArrange: canArrange,
     canExecute: canExecute, canAcknowledge: canAcknowledge, canClose: canClose
   };
-})();
-</script>
+})();</script>
 <!-- V4.2：门店空间配置（房型/工作量/清扫类型/二维码）、会议室、销售预订 -->
 <script>
 /* ==========================================================================
@@ -12889,8 +13049,7 @@ window.GuestReq = (function () {
   };
 })();
 </script>
-<script>
-/* HotelOps OPS-01~06: one existing work item, truthful room reminders and daily facts.
+<script>/* HotelOps OPS-01~06: one existing work item, truthful room reminders and daily facts.
  * Site checks are NOT quality inspections; loans and lost items do NOT affect saleability.
  * Browser-local demo does not claim multi-device durability. */
 window.OpsFlow = (function () {
@@ -13197,7 +13356,6 @@ window.OpsFlow = (function () {
     loanCreate:loanCreate,loanReturn:loanReturn,outstanding:outstanding,roomHints:roomHints,
     dailyCleaning:dailyCleaning,dailyEngineering:dailyEngineering,dailyFront:dailyFront };
 })();
-
 </script>
 <script>
 /* ==========================================================================
@@ -13701,8 +13859,7 @@ window.Cost = (function () {
 })();
 </script>
 <!-- PMS 标准适配层：业务代码只调用统一接口，不写死某一家 PMS -->
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * core/pms.js —— PMS 标准适配层（External PMS Adapter / Integration Layer）
  * 文档第十一节：
  *  · PMS 是房态与住宿业务数据的唯一权威来源，本系统只维护「作业状态」
@@ -13963,8 +14120,7 @@ window.PMS = (function () {
     /* V4 §21 集成中心：能力声明 */
     CAPS: CAPS, caps: caps, can: can, capInfo: capInfo, capsDeclared: capsDeclared
   };
-})();
-</script>
+})();</script>
 <!-- 应用层：路由 / TabBar / 全局事件委托（必须先于页面注册） -->
 <script>
 /* ==========================================================================
@@ -14406,8 +14562,7 @@ window.Comp = (function () {
   };
 })();
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/home.js —— 登录（切换身份）+ 各角色首页
  * 原则：员工首页 4—6 个入口，一键完成；管理者只看异常
  * ========================================================================== */
@@ -14982,6 +15137,11 @@ function staffEntries(u) {
   /* 员工餐申报属于全员个人功能，不依赖部门岗位；只要门店启用就优先显示。 */
   if (Policy.businessEnabled('staff_meal', u.hotelId)) add('go-meal', '员工餐申报', '🍚', '#faf4e9');
 
+  /* 临时顶班早餐员工沿用本职首页，只额外出现当班早餐现场入口。 */
+  if (Policy.businessEnabled('guest_breakfast',u.hotelId) &&
+      Policy.can(u,'breakfast_check') && !Policy.can(u,'frontdesk'))
+    add('go-breakfast-site','早餐现场核验','🥐','#e7f6ef');
+
   /* 销售岗位继续收敛：部门业务只保留高频事项；个人员工餐独立保留。 */
   if (Policy.businessEnabled('sales', u.hotelId) && Policy.can(u, 'sales') && !Policy.can(u, 'frontdesk')) {
     add('sl-new', '客房预订', '🛏', '#faf4e9');
@@ -15352,12 +15512,11 @@ App.act('mywork-open', function (el) {
 });
 
 App.act('go-breakfast-forecast', function () { App.go('breakfast-forecast'); });
+App.act('go-breakfast-site', function () { App.go('breakfast-site'); });
 App.act('go-breakfast-close', function () { App.go('breakfast-item/' + U.ymd()); });
 App.act('go-catering-close-history', function () { App.go('catering-close-history'); });
-
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/tasks.js —— 统一任务中心 / 任务详情 / 巡检执行
  * 文档第五节：所有酒店内部事务最终统一进入任务中心
  * ======================================================================= */
@@ -15505,6 +15664,7 @@ App.act('one-tap', function (el) {
   var t = DB.byId('tasks', id);
   if (!t) return;
   if (t.type === 'room_site_check') { App.go('task/'+id); return; }
+  if (t.type === 'lost_item_handoff') { App.go('lost-records'); return; }
   if (t.status === 'done' || t.status === 'closed') { U.toast('该任务已完成'); return; }
   if (t.status === 'pending') { Engine.Task.accept(id); U.toast('已接单，请尽快处理'); }
   else if (t.status === 'doing') { Engine.Task.finish(id, '处理完成，一切正常'); U.toast('已标记完成 ✓'); }
@@ -15519,6 +15679,16 @@ App.page('task', {
     var t = DB.byId('tasks', r.arg);
     if (!t) return Comp.empty('任务不存在');
     var S = Engine.Session, me = S.user();
+    if (t.type === 'lost_item_handoff') {
+      var item=DB.findOne('lostItems',function(x){return x.taskId===t.id&&AuthContext.inScope(x);});
+      return '<div class="card mt12"><div class="t-lg t-w6">'+U.esc(DB.roomNo(t.roomId))+' 房 · 遗留物</div>'
+        +(item?'<div class="t-md mt12">'+U.esc(item.note)+'</div>'
+          +(item.photos&&item.photos.length?Comp.photos(item.photos):'')
+          +(item.decision?'<div class="t-md mt12">前厅反馈：'+U.esc(RoomSvc.LOST_DECISIONS[item.decision]||'')
+            +(item.decisionNote?' · '+U.esc(item.decisionNote):'')+'</div>':''):'')
+        +'<button class="btn btn-primary btn-block mt16" data-act="go-lost-records">'
+        +(Policy.can(me,'frontdesk')?'处理工单':'查看前厅反馈')+'</button></div>';
+    }
     var wo = t.woId ? DB.byId('workOrders', t.woId) : null;
     var isRoomCleanTask = t.type === 'housekeeping' && !!t.roomId;
     var isRoomInspectionTask = t.type === 'room_inspection' && !!t.roomId;
@@ -16172,10 +16342,8 @@ App.act('site-result-submit',function(el){
   U.toast('已反馈前厅');
   App.refresh();
 });
-
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/report.js —— 快速上报
  * 验收标准：客房员工发现 805 空调坏了，5—10 秒内完成上报
  * 交互：选地点（扫码/点选）→ 点问题类型 → 可选拍照/语音 → 提交
@@ -16412,8 +16580,7 @@ App.act('rp-repair-pause', function () {
   if (!res || !res.ok) { U.toast((res && res.reason) || '暂停失败'); return; }
   U.toast('本房已暂停等待维修；现在可以去扫码清扫其他房间');
   App.go('hk-active');
-});
-</script>
+});</script>
 <script>
 /* ==========================================================================
  * pages/workorder.js —— 工程维修工单
@@ -17956,8 +18123,7 @@ App.page('inventory', {
   }
 });
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/org.js —— 组织与人员配置
  * V4.2.1 §3 责任链：
  *   投资人 / Owner  →  只任命或更换店长 + 最高所有权 + 紧急控制
@@ -18500,7 +18666,7 @@ App.page('org-grants', {
       return AuthContext.inScope(g);
     }).sort(function(a,b){return b.grantedAt-a.grantedAt;});
     var html = '<div class="card mt12"><div class="card-title">授权给某一位员工</div>'
-      + '<div class="t-xs c3 mt8">现已开放周期任务模板配置授权。其它特殊能力完成业务对象范围守卫后再开放；财务、任免等高风险权限不可委托。</div>'
+      + '<div class="t-xs c3 mt8">常规任务配置授权；早餐临时顶班使用下方专用入口。</div>'
       + '<div class="field mt12"><div class="field-label">员工</div><select class="inp" id="cg-user" style="flex:1">'
       + staff.map(function (u) {return '<option value="'+U.esc(u.id)+'">'+U.esc(u.name)+' · '+U.esc(DB.deptName(u.deptId))+'</option>';}).join('')
       + '</select></div>'
@@ -18514,6 +18680,17 @@ App.page('org-grants', {
       + '<option value="0">持续有效，直到撤权</option><option value="1">1 天</option><option value="7">7 天</option><option value="30">30 天</option>'
       + '</select></div>'
       + '<button class="btn btn-primary btn-block mt12" data-act="cg-grant"'+(staff.length?'':' disabled')+'>确认授权并记录</button></div>';
+    /* 早餐顶班只授予当天的现场工作权限；不改变主部门、不复制整个餐饮岗位。 */
+    html+='<div class="card"><div class="card-title">早餐现场临时顶班</div>'
+      +'<div class="field mt12"><div class="field-label">临时核验人员</div><select class="inp" id="cg-breakfast-user">'
+      +staff.map(function(u){return '<option value="'+U.esc(u.id)+'">'+U.esc(u.name)+' · '+U.esc(DB.deptName(u.deptId))+'</option>';}).join('')
+      +'</select></div>'
+      +'<div class="field"><div class="field-label">授权时长</div><select class="inp" id="cg-breakfast-hours">'
+      +'<option value="4">4 小时</option><option value="8">8 小时</option>'
+      +'<option value="12">12 小时</option><option value="24">24 小时</option>'
+      +'</select></div>'
+      +'<button class="btn btn-primary btn-block mt12" data-act="cg-breakfast-grant"'
+      +(staff.length?'':' disabled')+'>授权现场核验</button></div>';
     html += Comp.sectionTitle('历史授权与撤销');
     html += '<div class="list">' + (active.length?active.map(function(g) {
       var valid = Policy.activeGrants(DB.byId('users',g.userId),g.capability).some(function(x){return x.id===g.id;});
@@ -18536,6 +18713,16 @@ App.act('cg-grant',function(){
   var result=Policy.grant(user,cap,{deptIds:[dept],validUntil:days?Date.now()+days*86400000:0});
   U.toast(result.ok?'授权已生效':result.reason);
   if(result.ok){DB.flush();App.refresh();}
+});
+App.act('cg-breakfast-grant',function(){
+  var uid=(document.getElementById('cg-breakfast-user')||{}).value;
+  var hours=Number((document.getElementById('cg-breakfast-hours')||{}).value)||4;
+  var res=Policy.grant(uid,'breakfast_check',{
+    deptIds:['d_fb'],validUntil:Date.now()+hours*3600000,
+    reason:'早餐现场临时顶班'
+  });
+  if(!res||!res.ok)return U.toast((res&&res.reason)||'授权失败');
+  DB.flush();U.toast('早餐现场权限已授权 '+hours+' 小时');App.refresh();
 });
 App.act('cg-revoke',function(el){
   var id=el.getAttribute('data-id');
@@ -18616,7 +18803,6 @@ App.act('org-route-pick',function(el){
     if(res.ok){DB.flush();App.refresh();}
   });
 });
-
 </script>
 <script>
 /* ==========================================================================
@@ -20431,8 +20617,7 @@ App.act('logout', function () { App.logout(); });
 
 </script>
 <!-- V4.2 新增页面：客房作业中心 / 门店空间 / 会议室 / 销售 / 餐饮 / 供应商与物资库 -->
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/hk.js —— 客房作业中心 / 查房（V4.2 §4 / §5 / §12）
  * ---------------------------------------------------------------------------
  * 客房员：只看今天的清扫与整改，点一下就开始/完成
@@ -21057,8 +21242,7 @@ App.act('hk-batch-go', function () {
   DB.flush();
   U.toast('已发起 ' + res.count + ' 间' + (res.skipped.length ? '，跳过 ' + res.skipped.length + ' 间（已有任务）' : ''));
   App.go('hk');
-});
-</script>
+});</script>
 <script>
 /* ==========================================================================
  * pages/space.js —— 门店空间管理（V4.2 §3）
@@ -22183,8 +22367,7 @@ App.act('sl-resubmit-go', function (el) {
   U.toast(res.ok ? '已重新提交' : (res.reason || '')); App.refresh();
 });
 </script>
-<script>
-/* ==========================================================================
+<script>/* ==========================================================================
  * pages/catering.js —— 餐饮工作台（V4.2 §7）
  * ---------------------------------------------------------------------------
  * 三件事彻底分开、各自独立统计：
@@ -22214,23 +22397,21 @@ App.page('catering', {
         + '<div class="t-xs c3 mt8">不再产生新的早餐、员工餐、团餐或食材采购；历史记录和已存在未完成事项仍可查看并继续收尾。</div></div>';
     }
 
-    /* 早餐权益仅以 PMS 已提供的房号和份数为准，不能从在住房推算。 */
-    var todayEntitlements=Breakfast.pmsBoard(U.ymd());
-    var d=Breakfast.day();
+    var todaySrc=Breakfast.forecastSource(U.ymd());
+    var d=Breakfast.day(U.ymd(),false)||{};
     var tomorrowDate=U.ymd(Date.now()+86400000);
-    var tomorrowEntitlements=Breakfast.pmsBoard(tomorrowDate);
-    var tomorrowBreakfast=Breakfast.day(tomorrowDate,false);
+    var tomorrowSrc=Breakfast.forecastSource(tomorrowDate);
     html+='<div class="card mt12"><div class="card-title">今日住客早餐</div>'
-      +'<div class="t-xl t-w6 mt12">'+(todayEntitlements.available?todayEntitlements.total+' 份':'待 PMS 同步')+'</div>'
-      +(d.actualAt?'<div class="t-sm mt12">实际到餐 '+d.actual+' 人</div>':'')
-      +'</div>'
+      +'<div class="t-xl t-w6 mt12">'+(todaySrc.count===null?'待预报':todaySrc.count+' 人')+'</div>'
+      +'<div class="t-sm c2 mt8">'+U.esc(todaySrc.label)+'</div>'
+      +(d.actualAt?'<div class="t-sm mt12">餐后实际 '+d.actual+' 人</div>':'')+'</div>'
       +'<div class="card"><div class="card-title">明日早餐备餐人数</div>'
-      +'<div class="t-xl t-w6 mt12">'+(tomorrowEntitlements.available?tomorrowEntitlements.total+' 人':'待 PMS 同步')+'</div>'
-      +(tomorrowEntitlements.available && tomorrowBreakfast && tomorrowBreakfast.firstAt
-        && !tomorrowBreakfast.ackAt && Policy.can(u,'catering_ack')
+      +'<div class="t-xl t-w6 mt12">'+(tomorrowSrc.count===null?'待预报':tomorrowSrc.count+' 人')+'</div>'
+      +'<div class="t-sm c2 mt8">'+U.esc(tomorrowSrc.label)+'</div>'
+      +(tomorrowSrc.count!==null && Policy.can(u,'catering_ack')
         ?'<button class="btn btn-primary btn-block mt12" data-act="bf-ack" data-date="'+tomorrowDate+'">确认收到</button>':'')
       +'</div>';
-    if (Breakfast.canActual(u) && d.firstAt && !d.actual) {
+    if (Breakfast.canActual(u) && todaySrc.count!==null && !d.actualAt) {
       html+='<div class="card"><div class="card-title">早餐结束</div>'
         +'<button class="btn btn-green btn-block mt12" data-act="bf-actual">录入实际人数</button></div>';
     }
@@ -22320,6 +22501,129 @@ App.page('catering', {
   }
 });
 
+/* 早餐现场：任何获得早餐现场能力并当班的员工都可核验；不绑定部门。 */
+var _breakfastPurchaseType='walkin',_breakfastPurchaseKey='',_breakfastCheckKey='';
+App.page('breakfast-site',{
+  title:'早餐现场',
+  render:function(){
+    var me=Engine.Session.user();
+    if(!Breakfast.canCheck(me))return Comp.empty('请先开始工作并确认早餐现场权限','🔒');
+    return '<div class="card mt12"><div class="card-title">早餐现场工作</div>'
+      +'<div class="li" data-act="go-breakfast-attendance"><div class="grow"><div class="t-md t-w6">用餐人数核验</div>'
+      +'<div class="t-sm c2 mt8">核对含早份数、记录到餐人数、上传现场照片</div></div><div class="li-arrow">›</div></div>'
+      +'<div class="li" data-act="go-breakfast-receipts"><div class="grow"><div class="t-md t-w6">购买凭证登记</div>'
+      +'<div class="t-sm c2 mt8">上传现场购买或团购凭证，交前厅入账</div></div><div class="li-arrow">›</div></div>'
+      +'</div>';
+  }
+});
+App.page('breakfast-attendance',{
+  title:'用餐人数核验',
+  render:function(){
+    if(!Breakfast.canCheck(Engine.Session.user()))return Comp.empty('当前没有核验权限','🔒');
+    var board=Breakfast.pmsBoard(U.ymd()),sum=Breakfast.purchaseSummary(U.ymd());
+    return '<div class="card mt12"><div class="card-title">含早到餐</div>'
+      +(board.available?'<div class="t-md mt12">已核验 '+sum.checked+' / 含早 '+board.total+' 份</div>'
+        :'<div class="t-md mt12">PMS 含早数据待同步</div>')
+      +'<input class="inp mt12" id="bf-check-room" inputmode="numeric" placeholder="房号">'
+      +'<input class="inp mt12" id="bf-check-count" type="number" min="1" max="20" value="1" placeholder="实际到餐人数">'
+      +Comp.photoPicker('bf-attendance-photo','bf-attendance-photo-count',0,'用餐现场照片')
+      +'<button class="btn btn-primary btn-block mt12" data-act="bf-check-submit"'
+      +(board.available?'':' disabled')+'>确认到餐</button></div>';
+  }
+});
+App.page('breakfast-receipts',{
+  title:'购买凭证登记',
+  render:function(){
+    if(!Breakfast.canCheck(Engine.Session.user()))return Comp.empty('当前没有登记权限','🔒');
+    var rows=Breakfast.purchaseRows(U.ymd());
+    return '<div class="card mt12"><div class="card-title">购买凭证</div>'
+      +'<div class="opt-grid mt12">'
+      +['walkin','group'].map(function(t){
+        return '<div class="opt'+(_breakfastPurchaseType===t?' on':'')+'" data-act="bf-purchase-type" data-k="'+t+'">'
+          +(t==='walkin'?'现场购买':'团购凭证')+'</div>';
+      }).join('')+'</div>'
+      +'<input class="inp mt12" id="bf-purchase-count" type="number" min="1" max="100" value="1" placeholder="购买人数">'
+      +'<input class="inp mt12" id="bf-purchase-proof" placeholder="交易/团购凭证参考号（选填）">'
+      +Comp.photoPicker('bf-purchase-photo','bf-purchase-photo-count',0,'购买凭证照片')
+      +'<button class="btn btn-primary btn-block mt12" data-act="bf-purchase-submit">发送前厅入账</button></div>'
+      +'<div class="card"><div class="card-title">已发送前厅</div>'
+      +(rows.length?rows.slice(0,20).map(function(x){
+        return '<div class="row-b" style="padding:10px 0;border-bottom:1px solid var(--line)">'
+          +'<div class="t-md">'+U.esc(x.typeName)+' · '+x.count+' 人</div>'
+          +'<div class="t-sm c2">'+(x.status==='posted'?'已入账':'待入账')+'</div></div>';
+      }).join(''):Comp.empty('暂无购买记录','✅'))+'</div>';
+  }
+});
+App.act('go-breakfast-attendance',function(){App.go('breakfast-attendance');});
+App.act('go-breakfast-receipts',function(){App.go('breakfast-receipts');});
+App.act('go-breakfast-site',function(){App.go('breakfast-site');});
+App.act('bf-check-submit',function(){
+  var rn=(document.getElementById('bf-check-room')||{}).value;
+  var qty=Number((document.getElementById('bf-check-count')||{}).value);
+  if(!_breakfastCheckKey)_breakfastCheckKey=U.uid('check-submit');
+  var r=Breakfast.checkIn({roomNo:rn,count:qty,
+    photos:Comp.photoValues('bf-attendance-photo'),clientKey:_breakfastCheckKey});
+  if(!r||!r.ok)return U.toast((r&&r.reason)||'核验失败');
+  _breakfastCheckKey='';Comp.clearPhotos('bf-attendance-photo');
+  DB.flush();U.toast('已登记 · 该房剩余 '+r.remaining+' 份');App.refresh();
+});
+App.act('bf-purchase-type',function(el){
+  _breakfastPurchaseType=el.getAttribute('data-k');
+  Array.prototype.forEach.call(document.querySelectorAll('[data-act="bf-purchase-type"]'),function(x){
+    x.classList.toggle('on',x.getAttribute('data-k')===_breakfastPurchaseType);
+  });
+});
+App.act('bf-purchase-submit',function(){
+  if(!_breakfastPurchaseKey)_breakfastPurchaseKey=U.uid('purchase-submit');
+  var r=Breakfast.purchaseSubmit({
+    type:_breakfastPurchaseType,
+    count:Number((document.getElementById('bf-purchase-count')||{}).value),
+    proof:(document.getElementById('bf-purchase-proof')||{}).value,
+    photos:Comp.photoValues('bf-purchase-photo'),
+    clientKey:_breakfastPurchaseKey
+  });
+  if(!r||!r.ok)return U.toast((r&&r.reason)||'发送失败');
+  _breakfastPurchaseKey='';
+  Comp.clearPhotos('bf-purchase-photo');
+  DB.flush();U.toast(r.repeat?'该购买凭证已登记':'已发送前厅');App.refresh();
+});
+App.page('breakfast-purchases',{
+  title:'早餐待入账',
+  render:function(){
+    var me=Engine.Session.user();
+    if(!Policy.can(me,'frontdesk'))return Comp.empty('当前没有入账权限','🔒');
+    var pending=Breakfast.purchaseRows().filter(function(x){return x.status==='pending';});
+    var html='<div class="card mt12"><div class="card-title">待入账 · '+pending.length+' 笔</div>'
+      +(pending.length?pending.map(function(x){
+        return '<div class="li" data-act="bf-purchase-open" data-id="'+x.id+'">'
+          +'<div class="grow"><div class="t-md t-w6">'+U.esc(x.typeName)+' · '+x.count+' 人</div>'
+          +(x.proof?'<div class="t-sm c2 mt8">凭证 '+U.esc(x.proof)+'</div>':'')
+          +(x.photos&&x.photos.length?Comp.photos(x.photos):'')
+          +'</div><div class="li-arrow">›</div></div>';
+      }).join(''):Comp.empty('暂无待入账记录','✅'))+'</div>';
+    return html;
+  }
+});
+App.act('go-breakfast-purchases',function(){App.go('breakfast-purchases');});
+App.act('bf-purchase-open',function(el){
+  var x=DB.byId('breakfastPurchases',el.getAttribute('data-id'));
+  if(!x||!Policy.can(Engine.Session.user(),'frontdesk')||x.status!=='pending')return;
+  App.sheet({title:x.typeName+' · '+x.count+' 人',
+    body:'<div class="pad" style="padding:8px 18px">'
+      +(x.proof?'<div class="t-md">凭证：'+U.esc(x.proof)+'</div>':'')
+      +(x.photos&&x.photos.length?Comp.photos(x.photos):'')
+      +'<input class="inp mt12" id="bf-post-ref" placeholder="原收银系统入账单号"></div>',
+    foot:'<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      +'<button class="btn btn-primary grow" data-act="bf-purchase-post" data-id="'+x.id+'">确认已入账</button>'
+  });
+});
+App.act('bf-purchase-post',function(el){
+  var r=Breakfast.purchasePost(el.getAttribute('data-id'),
+    (document.getElementById('bf-post-ref')||{}).value);
+  if(!r||!r.ok)return U.toast((r&&r.reason)||'确认失败');
+  DB.flush();App.closeSheet();U.toast('已入账');App.refresh();
+});
+
 /* ---------------- 早餐：预计 / 实际 ---------------- */
 App.act('bf-ack', function (el) {
   var res = Breakfast.acknowledge(el.getAttribute('data-date') || U.ymd(Date.now() + 86400000));
@@ -22329,9 +22633,30 @@ App.act('bf-ack', function (el) {
 });
 
 
-/* 旧版按钮可能残留在历史页面。此处也不允许继续手动填写预计人数。 */
-App.act('bf-forecast',function(){U.toast('早餐份数从 PMS 获取，无需人工录入');});
-App.act('bf-forecast-save',function(){U.toast('已取消手动录入早餐人数');});
+App.act('bf-forecast',function(el){
+  var date=el.getAttribute('data-date')||U.ymd(Date.now()+86400000);
+  var src=Breakfast.forecastSource(date);
+  if(src.mode==='pms')return U.toast('PMS 已自动同步，无需手动预报');
+  App.sheet({
+    title:'早餐人数预报',
+    body:'<div class="pad" style="padding:8px 18px"><div class="t-md">'
+      +U.esc(date)+' · '+U.esc(src.label)+'</div>'
+      +'<input class="inp mt12" id="bf-forecast-count" type="number" min="0" max="9999" value="'
+      +(src.count===null?'':src.count)+'" placeholder="预计早餐人数">'
+      +'<textarea class="inp mt12" id="bf-forecast-note" rows="2" placeholder="备注（选填）"></textarea></div>',
+    foot:'<button class="btn btn-ghost grow" data-act="close-sheet">取消</button>'
+      +'<button class="btn btn-primary grow" data-act="bf-forecast-save" data-date="'+date+'">保存预报</button>'
+  });
+});
+App.act('bf-forecast-save',function(el){
+  var date=el.getAttribute('data-date')||U.ymd(Date.now()+86400000);
+  var r=Breakfast.forecast((document.getElementById('bf-forecast-count')||{}).value,{
+    date:date,note:(document.getElementById('bf-forecast-note')||{}).value,
+    reason:Breakfast.forecastSource(date).mode==='fallback'?'PMS 异常人工兜底':'前厅人工预报'
+  });
+  if(!r||!r.ok)return U.toast((r&&r.reason)||'保存失败');
+  DB.flush();App.closeSheet();U.toast('早餐预计已更新');App.refresh();
+});
 var _bfActualPhotos = [];
 var _tmDonePhotos = [];
 App.act('bf-actual', function () {
@@ -22478,39 +22803,43 @@ App.page('team-meal', {
 });
 
 /* 前厅查早餐权益：只看每房含早份数及总份数，没有手填/修订按钮。 */
-App.page('breakfast-forecast', {
+App.page('breakfast-forecast',{
   title:'住客早餐',
   render:function(){
     var me=Engine.Session.user();
     if(!Policy.can(me,'frontdesk'))return Comp.empty('当前没有查看权限','🔒');
-    function dayRows(date,label) {
-      var board=Breakfast.pmsBoard(date);
-      if(!board.available)
-        return '<div class="card"><div class="card-title">'+label+'</div><div class="t-md mt12">待 PMS 同步</div></div>';
+    function row(date,label){
+      var src=Breakfast.forecastSource(date);
       return '<div class="card"><div class="row-b"><div class="card-title">'+label+'</div>'
-        +'<div class="t-lg t-w6">'+board.total+' 份</div></div>'
-        +(board.rooms.length?'<div class="list mt12">'+board.rooms.map(function(r){
-          return '<div class="row-b" style="padding:10px 0;border-bottom:1px solid var(--line)">'
-            +'<div class="t-md">'+U.esc(r.roomNo)+' 房</div><div class="t-md t-w6">'+r.count+' 份</div></div>';
-        }).join('')+'</div>':'<div class="t-sm c2 mt12">没有含早记录</div>')
+        +'<div class="t-lg t-w6">'+(src.count===null?'待预报':src.count+' 人')+'</div></div>'
+        +'<div class="t-sm c2 mt8">'+U.esc(src.label)+'</div>'
+        +(src.mode==='pms'
+          ?(src.rooms.length?'<div class="list mt12">'+src.rooms.map(function(r){
+            return '<div class="row-b mt12"><div class="t-md">'+U.esc(r.roomNo)+' 房</div>'
+              +'<div class="t-md t-w6">'+r.count+' 份</div></div>';
+          }).join('')+'</div>':'')
+          :'<button class="btn btn-primary btn-block mt12" data-act="bf-forecast" data-date="'+date+'">'
+            +(src.count===null?'录入预计人数':'修改预计人数')+'</button>')
         +'</div>';
     }
-    return dayRows(U.ymd(),'今日含早房间')
-      +dayRows(U.ymd(Date.now()+86400000),'明日含早房间');
+    return '<div class="card mt12"><button class="btn btn-primary btn-block" data-act="go-breakfast-purchases">早餐待入账 · '
+      +Breakfast.purchaseSummary(U.ymd()).pending+' 笔</button></div>'
+      +row(U.ymd(),'今日早餐')+row(U.ymd(Date.now()+86400000),'明日早餐');
   }
 });
-
 App.page('breakfast-item', {
   title: '早餐事项',
   render: function (r) {
     var date=r.arg||U.ymd(), d=Breakfast.day(date,false), me=Engine.Session.user();
     var board=Breakfast.pmsBoard(date);
-    if (!d && !board.available) return Comp.empty('早餐权益待 PMS 同步','🥐');
+    var source=Breakfast.forecastSource(date);
+    if (!d && source.count===null) return Comp.empty('早餐人数尚未预报','🥐');
     if (!d) d={date:date,firstAt:0,finalForecast:0,firstForecast:0,actualAt:0,actual:0,ackAt:0,ackBy:'',leftoverPhotos:[]};
     var hist = Breakfast.history(d.date), latest = hist.length ? hist[hist.length - 1] : null;
     var change = latest && latest.from !== 0 ? (latest.to - latest.from) : 0;
     var html = '<div class="card mt12"><div class="card-title">' + U.esc(d.date) + ' 早餐</div>'
-      + '<div class="t-xl t-w6 mt12">'+(board.available?('含早 '+board.total+' 份'):'PMS 未同步含早数据')+'</div>'
+      + '<div class="t-xl t-w6 mt12">'+(source.count===null?'待预报':source.count+' 人')+'</div>'
+      + '<div class="t-sm c2 mt8">'+U.esc(source.label)+'</div>'
       + (latest && latest.from !== 0 ? '<div class="t-sm mt8" style="color:var(--orange)">最近修订：' + latest.from + ' → ' + latest.to + ' 人（' + (change > 0 ? '+' : '') + change + '）</div><div class="t-xs c3 mt8">' + U.esc(latest.byName || DB.userName(latest.by)) + ' · ' + U.esc(U.relTime(latest.at)) + '</div>' : '')
       + (d.ackAt ? '<div class="t-xs c3 mt8">已确认：' + U.esc(d.ackByName || DB.userName(d.ackBy)) + '</div>' : '<div class="t-xs c3 mt8">待厨师确认</div>')
       + '</div>';
@@ -22538,8 +22867,8 @@ App.page('breakfast-item', {
         + ((d.leftoverPhotos || []).length ? '<div class="t-sm t-w6 mt12">餐后照片</div>' + Comp.photos(d.leftoverPhotos) : '<div class="t-xs c3 mt8">无餐后照片</div>')
         + '</div>';
     }
-    if (d.firstAt && !d.ackAt && Policy.can(me, 'catering_ack')) html += '<div class="btn btn-primary btn-block" data-act="bf-ack" data-date="' + d.date + '">确认已知悉</div>';
-    if (d.firstAt && !d.actualAt && Breakfast.canActual(me) && d.date === U.ymd()) html += '<div class="btn btn-green btn-block mt12" data-act="bf-actual">录实际人数与餐后照片</div>';
+    if (source.count!==null && !d.ackAt && Policy.can(me, 'catering_ack')) html += '<div class="btn btn-primary btn-block" data-act="bf-ack" data-date="' + d.date + '">确认已知悉</div>';
+    if (source.count!==null && !d.actualAt && Breakfast.canActual(me) && d.date === U.ymd()) html += '<div class="btn btn-green btn-block mt12" data-act="bf-actual">录实际人数与餐后照片</div>';
     return html;
   }
 });
@@ -22681,8 +23010,7 @@ App.act('tm-done-go', function (el) {
   if (!res || res.ok === false) { U.toast((res && res.reason) || '完成失败'); return; }
   DB.flush(); App.closeSheet();
   U.toast('团餐已完成'); App.refresh();
-});
-</script>
+});</script>
 <script>
 /* ==========================================================================
  * pages/supply.js —— 供应商与物资库（V4.2 §6.1 / §6.2）
@@ -23815,8 +24143,7 @@ App.act('gq-transfer-save', function (el) {
   if (res.ok) { DB.flush(); App.closeSheet(); App.refresh(); }
 });
 </script>
-<script>
-/* OPS-01~06 mobile entry points: reuse existing task, guest request and repair models. */
+<script>/* OPS-01~06 mobile entry points: reuse existing task, guest request and repair models. */
 (function () {
   function currentRoom(no) {
     no = String(no || '').trim();
@@ -24011,19 +24338,30 @@ App.act('gq-transfer-save', function (el) {
       var other=records.filter(function(x){return !!x.decision;});
       function card(item) {
         var room=DB.roomNo(item.roomId),reply=item.decision&&RoomSvc.LOST_DECISIONS[item.decision];
+        var task=item.taskId&&DB.byId('tasks',item.taskId);
+        var claimed=!!task&&task.claimBy===Engine.Session.user().id&&task.status==='doing';
         return '<div class="card"><div class="row-b"><div class="t-md t-w6">'
           +U.esc(room)+' 房 · '+U.esc(item.note)+'</div>'
           +'<span class="chip '+(reply?'chip-blue':'chip-orange')+'">'+(reply?'已反馈':'待前厅处理')+'</span></div>'
           +(item.photos&&item.photos.length?Comp.photos(item.photos):'')
           +(reply?'<div class="t-md mt12">前厅反馈：'+U.esc(reply)+(item.decisionNote?' · '+U.esc(item.decisionNote):'')+'</div>':'')
-          +(front?'<button class="btn btn-primary btn-block mt12" data-act="lost-decision-open" data-id="'+item.id+'">'
-            +(reply?'修改处理方式':'反馈处理方式')+'</button>':'')+'</div>';
+          +(front&&!reply&&task&&task.status==='pending'
+            ?'<button class="btn btn-primary btn-block mt12" data-act="lost-claim" data-id="'+item.id+'">接单处理</button>':'')
+          +(front&&(!task||claimed||reply)
+            ?'<button class="btn btn-primary btn-block mt12" data-act="lost-decision-open" data-id="'+item.id+'">'
+            +(reply?'更新处理反馈':'选择处理方式')+'</button>':'')+'</div>';
       }
       return (waiting.length?waiting.map(card).join(''):'')
         +(other.length?other.slice(0,20).map(card).join(''):'');
     }
   });
   App.act('go-lost-records',function(){App.go('lost-records');});
+  App.act('lost-claim',function(el){
+    var r=RoomSvc.lostClaim(el.getAttribute('data-id'));
+    if(!r||!r.ok)return U.toast((r&&r.reason)||'接单失败');
+    DB.flush();U.toast('已接单');App.refresh();
+  });
+
   var _lostDecision='';
   App.act('lost-decision-open',function(el){
     var item=DB.byId('lostItems',el.getAttribute('data-id'));
@@ -24058,7 +24396,6 @@ App.act('gq-transfer-save', function (el) {
     DB.flush();App.closeSheet();U.toast(r.repeat?'原处理方式未变':'已反馈发现物品的客房人员');App.refresh();
   });
 })();
-
 </script>
 <script>
 /* ==========================================================================
